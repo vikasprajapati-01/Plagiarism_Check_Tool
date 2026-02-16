@@ -129,3 +129,16 @@ async def async_fetch_all_hashes() -> List[str]:
 		return [r["sha256"] for r in rows]
 	finally:
 		await conn.close()
+
+async def async_fetch_all_texts_by_batch(batch_id: str) -> List[str]:
+    """
+    Fetch all text entries for a given batch ID.
+    
+    This is used by fuzzy matching to compare against existing texts.
+    """
+    # TODO: Implement based on your database schema
+    # Example with SQLite:
+    query = "SELECT text_content FROM texts WHERE batch_id = ?"
+    cursor = await db.execute(query, (batch_id,))
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows]
