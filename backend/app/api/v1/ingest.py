@@ -2,7 +2,6 @@
 
 import io
 import os
-from functools import lru_cache
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -10,16 +9,12 @@ from fastapi import FastAPI, File, Form, UploadFile
 
 from app.services.preprocess import preprocess_texts
 from app.services.detect import sha256_hash
+from app.services.embeddings import get_model, encode_texts, is_available
 from app.storage.repository import (
 	async_create_batch,
 	async_insert_embeddings,
 	async_insert_reference_texts,
 )
-
-try:
-	from sentence_transformers import SentenceTransformer
-except Exception:  # pragma: no cover - optional dependency
-	SentenceTransformer = None
 
 app = FastAPI(title="Ingest API")
 
@@ -37,14 +32,6 @@ def _read_rows_from_file(filename: str, contents: bytes) -> Iterable[str]:
 		text_data = contents.decode("utf-8").splitlines()
 		return [line.strip() for line in text_data if line.strip()]
 	raise ValueError("Unsupported file format")
-
-
-@lru_cache(maxsize=1)
-def _get_embedding_model():
-	if SentenceTransformer is None:
-		return None
-	model_name = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-	return SentenceTransformer(model_name)
 
 
 @app.post("/input/data")
@@ -113,14 +100,13 @@ async def register_reference(
 	embeddings_built = False
 	model_name_used = None
 
-	if build_embeddings and SentenceTransformer is not None:
-		model = _get_embedding_model()
-		if model:
-			model_name_used = model.__dict__.get("_model_card", None) or os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-			emb_array = model.encode(cleaned_rows, convert_to_numpy=True, normalize_embeddings=True)
-			pairs = [(rid, vec.tolist()) for rid, vec in zip(ref_ids, emb_array)]
-			await async_insert_embeddings(pairs)
-			embeddings_built = True
+	if build_embeddings and is_available():
+		model = get_model()
+		model_name_used = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+		emb_vecs = encode_texts(cleaned_rows, preprocess=False)  # already cleaned
+		pairs = [(rid, vec) for rid, vec in zip(ref_ids, emb_vecs)]
+		await async_insert_embeddings(pairs)
+		embeddings_built = True
 
 	return {
 		"status": "Reference batch registered",
@@ -129,3 +115,4 @@ async def register_reference(
 		"embeddings_built": embeddings_built,
 		"model": model_name_used,
 	}
+
