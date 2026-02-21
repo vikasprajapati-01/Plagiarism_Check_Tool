@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.ingest import router as ingest_router
-from app.api.v1.detect import router as detect_router
+from app.api.v1.ingest import app as ingest_router
+from app.api.v1.detect import app as detect_router
 
 app = FastAPI(title="Plagiarism Check Tool API")
 

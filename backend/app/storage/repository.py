@@ -130,15 +130,30 @@ async def async_fetch_all_hashes() -> List[str]:
 	finally:
 		await conn.close()
 
-async def async_fetch_all_texts_by_batch(batch_id: str) -> List[str]:
-    """
-    Fetch all text entries for a given batch ID.
-    
-    This is used by fuzzy matching to compare against existing texts.
-    """
-    # TODO: Implement based on your database schema
-    # Example with SQLite:
-    query = "SELECT text_content FROM texts WHERE batch_id = ?"
-    cursor = await db.execute(query, (batch_id,))
-    rows = await cursor.fetchall()
-    return [row[0] for row in rows]
+
+async def async_get_batch_id_by_name(name: str) -> Optional[str]:
+	conn = await _get_async_conn()
+	try:
+		row = await conn.fetchrow(
+			"select id from reference_batch where name = $1 limit 1;",
+			name,
+		)
+		return str(row["id"]) if row else None
+	finally:
+		await conn.close()
+
+
+async def async_fetch_all_texts_by_batch(batch_id: Optional[str] = None) -> List[str]:
+	"""Fetch cleaned texts for a batch, or all if no batch provided."""
+	conn = await _get_async_conn()
+	try:
+		if batch_id:
+			rows = await conn.fetch(
+				"select cleaned_text from reference_text where batch_id = $1;",
+				batch_id,
+			)
+		else:
+			rows = await conn.fetch("select cleaned_text from reference_text;")
+		return [r["cleaned_text"] for r in rows]
+	finally:
+		await conn.close()
