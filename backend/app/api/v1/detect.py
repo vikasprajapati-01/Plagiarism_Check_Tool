@@ -49,6 +49,7 @@ async def detect_exact(
         "scope": "batch" if resolved_batch_id else "global",
     }
 
+# Fuzzy duplicate detection endpoint
 
 @app.post("/fuzzy")
 async def detect_fuzzy_duplicate(
