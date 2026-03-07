@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -24,11 +25,26 @@ def _get_conn():
 	return psycopg2.connect(db_url)
 
 
-async def _get_async_conn():
-	db_url = os.getenv("DATABASE_URL")
-	if not db_url:
-		raise RuntimeError("DATABASE_URL not set")
-	return await asyncpg.connect(dsn=db_url)
+# Shared async connection pool
+
+_pool: Optional[asyncpg.Pool] = None
+_pool_lock = asyncio.Lock()
+
+
+async def _get_pool() -> asyncpg.Pool:
+	"""Lazy singleton pool — created once, reused by all async functions."""
+	global _pool
+	if _pool is not None:
+		return _pool
+	async with _pool_lock:
+		# Re-check inside the lock in case another coroutine already created it.
+		if _pool is None:
+			db_url = os.getenv("DATABASE_URL")
+			if not db_url:
+				raise RuntimeError("DATABASE_URL not set")
+			_pool = await asyncpg.create_pool(dsn=db_url, min_size=1, max_size=10)
+	return _pool
+
 
 
 # ----------------------- Sync helpers ----------------------- #
@@ -51,15 +67,13 @@ def fetch_all_hashes() -> List[str]:
 # ----------------------- Async helpers ----------------------- #
 
 async def async_create_batch(name: Optional[str] = None) -> str:
-	conn = await _get_async_conn()
-	try:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
 		batch_id = await conn.fetchval(
 			"insert into reference_batch (name) values ($1) returning id;",
 			name,
 		)
 		return str(batch_id)
-	finally:
-		await conn.close()
 
 
 async def async_insert_reference_texts(
@@ -69,8 +83,8 @@ async def async_insert_reference_texts(
 	rows = list(items)
 	if not rows:
 		return []
-	conn = await _get_async_conn()
-	try:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
 		ids: List[str] = []
 		insert_sql = (
 			"insert into reference_text (batch_id, raw_text, cleaned_text, sha256, source, license) "
@@ -89,16 +103,14 @@ async def async_insert_reference_texts(
 				)
 				ids.append(str(ref_id))
 		return ids
-	finally:
-		await conn.close()
 
 
 async def async_insert_embeddings(pairs: Iterable[Tuple[str, Sequence[float]]]) -> None:
 	data = list(pairs)
 	if not data:
 		return
-	conn = await _get_async_conn()
-	try:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
 		values = [(ref_id, _vector_literal(vec)) for ref_id, vec in data]
 		insert_sql = (
 			"insert into reference_embedding (ref_id, embedding) values ($1, $2::vector) "
@@ -106,39 +118,44 @@ async def async_insert_embeddings(pairs: Iterable[Tuple[str, Sequence[float]]]) 
 		)
 		async with conn.transaction():
 			await conn.executemany(insert_sql, values)
-	finally:
-		await conn.close()
 
 
 async def async_fetch_hashes_by_batch(batch_id: str) -> List[str]:
-	conn = await _get_async_conn()
-	try:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
 		rows = await conn.fetch(
 			"select sha256 from reference_text where batch_id = $1;",
 			batch_id,
 		)
 		return [r["sha256"] for r in rows]
-	finally:
-		await conn.close()
 
 
 async def async_fetch_all_hashes() -> List[str]:
-	conn = await _get_async_conn()
-	try:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
 		rows = await conn.fetch("select sha256 from reference_text;")
 		return [r["sha256"] for r in rows]
-	finally:
-		await conn.close()
 
-async def async_fetch_all_texts_by_batch(batch_id: str) -> List[str]:
-    """
-    Fetch all text entries for a given batch ID.
-    
-    This is used by fuzzy matching to compare against existing texts.
-    """
-    # TODO: Implement based on your database schema
-    # Example with SQLite:
-    query = "SELECT text_content FROM texts WHERE batch_id = ?"
-    cursor = await db.execute(query, (batch_id,))
-    rows = await cursor.fetchall()
-    return [row[0] for row in rows]
+
+async def async_get_batch_id_by_name(name: str) -> Optional[str]:
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
+		row = await conn.fetchrow(
+			"select id from reference_batch where name = $1 limit 1;",
+			name,
+		)
+		return str(row["id"]) if row else None
+
+
+async def async_fetch_all_texts_by_batch(batch_id: Optional[str] = None) -> List[str]:
+	"""Fetch cleaned texts for a batch, or all if no batch provided."""
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
+		if batch_id:
+			rows = await conn.fetch(
+				"select cleaned_text from reference_text where batch_id = $1;",
+				batch_id,
+			)
+		else:
+			rows = await conn.fetch("select cleaned_text from reference_text;")
+		return [r["cleaned_text"] for r in rows]
