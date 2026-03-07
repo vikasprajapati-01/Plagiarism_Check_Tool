@@ -8,12 +8,15 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.services.ai_detection import detect_ai_content, detect_ai_batch, is_available
+from app.services.reports import DetectionResult, classify_risk, generate_report_bytes, _OPENPYXL_AVAILABLE
+from fastapi.responses import StreamingResponse
 
 app = APIRouter()
 
 
 class BatchAIRequest(BaseModel):
     texts: list[str]
+    download_report: bool = False
 
 
 def _read_rows_from_file(filename: str, contents: bytes) -> list[str]:
@@ -45,6 +48,7 @@ async def ai_detect_root():
 async def check_ai_content(
     text: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+    download_report: bool = Form(False),
 ):
     if not is_available():
         raise HTTPException(
@@ -65,6 +69,27 @@ async def check_ai_content(
             raise HTTPException(status_code=400, detail="File contained no usable text")
 
         results = await detect_ai_batch(rows)
+        if download_report:
+            if not _OPENPYXL_AVAILABLE:
+                raise HTTPException(status_code=503, detail="openpyxl is not installed. Run: pip install openpyxl")
+            detection_results = []
+            for text_row, res in zip(rows, results):
+                is_ai = res["label"] == "AI"
+                confidence = res["confidence"]
+                detection_results.append(DetectionResult(
+                    text=text_row,
+                    is_duplicate=is_ai,
+                    similarity_scores={"ai_confidence": confidence},
+                    risk_level=classify_risk(confidence) if is_ai else "none",
+                    detection_method="ai",
+                    notes=f"Label: {res['label']} | Raw: {res['raw_label']} | Confidence: {confidence:.2%}",
+                ))
+            report_bytes = generate_report_bytes(detection_results)
+            return StreamingResponse(
+                io.BytesIO(report_bytes),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": "attachment; filename=ai_detection_report.xlsx"},
+            )
         return {
             "total": len(results),
             "results": [
@@ -80,6 +105,26 @@ async def check_ai_content(
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
 
+        if download_report:
+            if not _OPENPYXL_AVAILABLE:
+                raise HTTPException(status_code=503, detail="openpyxl is not installed. Run: pip install openpyxl")
+            is_ai = result["label"] == "AI"
+            confidence = result["confidence"]
+            detection_result = DetectionResult(
+                text=text,
+                is_duplicate=is_ai,
+                similarity_scores={"ai_confidence": confidence},
+                risk_level=classify_risk(confidence) if is_ai else "none",
+                detection_method="ai",
+                notes=f"Label: {result['label']} | Raw: {result['raw_label']} | Confidence: {confidence:.2%}",
+            )
+            report_bytes = generate_report_bytes([detection_result])
+            return StreamingResponse(
+                io.BytesIO(report_bytes),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": "attachment; filename=ai_detection_report.xlsx"},
+            )
+
         return result
 
     # No input provided
@@ -89,6 +134,7 @@ async def check_ai_content(
 async def check_ai_content_batch(
     request: BatchAIRequest | None = None,
     file: Optional[UploadFile] = File(None),
+    download_report: bool = Form(False),
 ):
     if not is_available():
         raise HTTPException(
@@ -116,6 +162,30 @@ async def check_ai_content_batch(
         raise HTTPException(status_code=400, detail="No texts to process")
 
     results = await detect_ai_batch(rows)
+
+    should_download = download_report or (request is not None and request.download_report)
+
+    if should_download:
+        if not _OPENPYXL_AVAILABLE:
+            raise HTTPException(status_code=503, detail="openpyxl is not installed. Run: pip install openpyxl")
+        detection_results = []
+        for text_row, res in zip(rows, results):
+            is_ai = res["label"] == "AI"
+            confidence = res["confidence"]
+            detection_results.append(DetectionResult(
+                text=text_row,
+                is_duplicate=is_ai,
+                similarity_scores={"ai_confidence": confidence},
+                risk_level=classify_risk(confidence) if is_ai else "none",
+                detection_method="ai",
+                notes=f"Label: {res['label']} | Raw: {res['raw_label']} | Confidence: {confidence:.2%}",
+            ))
+        report_bytes = generate_report_bytes(detection_results)
+        return StreamingResponse(
+            io.BytesIO(report_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=ai_batch_detection_report.xlsx"},
+        )
 
     return {
         "total": len(results),

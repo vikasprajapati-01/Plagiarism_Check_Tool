@@ -74,8 +74,6 @@ class DetectionResult:
 # RISK LEVEL HELPERS
 # ==============================================================================
 
-_RISK_ORDER = {"high": 3, "medium": 2, "low": 1, "none": 0}
-
 
 def classify_risk(score: float) -> str:
     """Classify a similarity score into a risk level.
