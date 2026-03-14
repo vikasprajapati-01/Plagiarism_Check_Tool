@@ -11,7 +11,11 @@ from app.services.detect import is_exact_duplicate
 from app.services.fuzzy import is_fuzzy_duplicate, find_fuzzy_duplicates_in_batch
 from app.services.embeddings import is_semantic_duplicate, find_semantic_duplicates_in_batch, is_available as embeddings_available
 from app.services.reports import DetectionResult, classify_risk, generate_report_bytes, _OPENPYXL_AVAILABLE
-from app.storage.repository import async_fetch_all_texts_by_batch, async_get_batch_id_by_name
+from app.storage.repository import (
+    async_fetch_all_texts_by_batch,
+    async_get_batch_id_by_name,
+    async_fetch_all_texts_with_batch_info,
+)
 
 app = APIRouter()
 
@@ -24,6 +28,13 @@ class BatchFuzzyRequest(BaseModel):
 
 class BatchSemanticRequest(BaseModel):
     texts: list[str]
+    threshold: float = 0.85
+    download_report: bool = False
+
+
+class CrossBatchRequest(BaseModel):
+    texts: list[str]
+    method: str = "fuzzy"          # "exact" | "fuzzy" | "semantic"
     threshold: float = 0.85
     download_report: bool = False
 
@@ -326,4 +337,152 @@ async def detect_batch_semantic_duplicates(request: BatchSemanticRequest):
             }
             for i, j, score in duplicates
         ],
+    }
+
+
+# ==============================================================================
+# CROSS-BATCH DUPLICATE DETECTION — Check against ALL stored batches
+# ==============================================================================
+
+@app.post("/cross-batch")
+async def detect_cross_batch_duplicates(request: CrossBatchRequest):
+    """
+    Check each submitted text against every reference text stored across
+    ALL batches in the database.
+
+    Returns which batch each match came from (batch_id + batch_name).
+
+    Methods:
+        exact    — SHA-256 hash comparison
+        fuzzy    — Levenshtein / Jaccard / N-gram
+        semantic — SBERT cosine similarity (requires sentence-transformers)
+    """
+    method = request.method.lower()
+    if method not in ("exact", "fuzzy", "semantic"):
+        raise HTTPException(status_code=400, detail="method must be 'exact', 'fuzzy', or 'semantic'")
+
+    if method == "semantic" and not embeddings_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic detection unavailable. Install: pip install sentence-transformers",
+        )
+
+    if not request.texts:
+        raise HTTPException(status_code=400, detail="Provide at least one text")
+
+    # Fetch every stored reference text with batch metadata
+    all_refs = await async_fetch_all_texts_with_batch_info()
+
+    if not all_refs:
+        return {
+            "total_submitted": len(request.texts),
+            "total_references": 0,
+            "message": "No reference texts found in the database. Register batches first via /api/v1/ingest/reference/register",
+            "results": [],
+        }
+
+    ref_texts   = [r["cleaned_text"] for r in all_refs]
+    ref_raw     = [r["raw_text"]     for r in all_refs]
+    ref_batches = [(r["batch_id"], r["batch_name"]) for r in all_refs]
+
+    results = []
+
+    for submitted in request.texts:
+        match_found        = False
+        matched_raw        = None
+        matched_batch_id   = None
+        matched_batch_name = None
+        scores: dict       = {}
+
+        if method == "exact":
+            from app.services.detect import sha256_hash
+            from app.services.preprocess import preprocess_text
+            cleaned = preprocess_text(submitted)
+            submitted_hash = sha256_hash(cleaned)
+            for ref_clean, (bid, bname) in zip(ref_texts, ref_batches):
+                if sha256_hash(ref_clean) == submitted_hash:
+                    match_found        = True
+                    matched_raw        = ref_clean
+                    matched_batch_id   = bid
+                    matched_batch_name = bname
+                    scores             = {"exact": 1.0}
+                    break
+
+        elif method == "fuzzy":
+            is_dup, matched_text, match_scores = await is_fuzzy_duplicate(
+                submitted, ref_texts, threshold=request.threshold
+            )
+            if is_dup and matched_text is not None:
+                match_found        = True
+                matched_raw        = matched_text
+                idx                = ref_texts.index(matched_text)
+                matched_batch_id, matched_batch_name = ref_batches[idx]
+                scores             = match_scores or {}
+
+        elif method == "semantic":
+            is_dup, matched_text, sim_score = await is_semantic_duplicate(
+                submitted, ref_texts, threshold=request.threshold
+            )
+            if is_dup and matched_text is not None:
+                match_found        = True
+                matched_raw        = matched_text
+                idx                = ref_texts.index(matched_text)
+                matched_batch_id, matched_batch_name = ref_batches[idx]
+                scores             = {"cosine_similarity": sim_score}
+
+        # Resolve back to original raw text for display
+        matched_original = None
+        if matched_raw is not None:
+            try:
+                idx = ref_texts.index(matched_raw)
+                matched_original = ref_raw[idx]
+            except ValueError:
+                matched_original = matched_raw
+
+        best_score = max(scores.values()) if scores else 0.0
+
+        results.append({
+            "submitted_text":     submitted,
+            "is_duplicate":       match_found,
+            "matched_text":       matched_original,
+            "matched_batch_id":   matched_batch_id,
+            "matched_batch_name": matched_batch_name,
+            "similarity_scores":  scores,
+            "risk_level":         classify_risk(best_score) if match_found else "none",
+            "detection_method":   method,
+        })
+
+    if request.download_report:
+        if not _OPENPYXL_AVAILABLE:
+            raise HTTPException(status_code=503, detail="openpyxl is not installed. Run: pip install openpyxl")
+        report_items = [
+            DetectionResult(
+                text=r["submitted_text"],
+                is_duplicate=r["is_duplicate"],
+                similarity_scores=r["similarity_scores"],
+                source=r["matched_text"],
+                risk_level=r["risk_level"],
+                detection_method=r["detection_method"],
+                notes=(
+                    f"Matched batch: {r['matched_batch_name']} (id={r['matched_batch_id']})"
+                    if r["is_duplicate"] else None
+                ),
+            )
+            for r in results
+        ]
+        report_bytes = generate_report_bytes(report_items)
+        return StreamingResponse(
+            io.BytesIO(report_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=cross_batch_report.xlsx"},
+        )
+
+    total_dups = sum(1 for r in results if r["is_duplicate"])
+    return {
+        "total_submitted":  len(request.texts),
+        "total_references": len(all_refs),
+        "total_duplicates": total_dups,
+        "method":           method,
+        "threshold":        request.threshold,
+        "results":          results,
     }

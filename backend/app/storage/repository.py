@@ -159,3 +159,43 @@ async def async_fetch_all_texts_by_batch(batch_id: Optional[str] = None) -> List
 		else:
 			rows = await conn.fetch("select cleaned_text from reference_text;")
 		return [r["cleaned_text"] for r in rows]
+
+
+async def async_fetch_all_batches() -> List[dict]:
+	"""Return a list of all stored batches as {id, name}."""
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
+		rows = await conn.fetch("select id, name from reference_batch order by created_at desc;")
+		return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+
+
+async def async_fetch_all_texts_with_batch_info() -> List[dict]:
+	"""Fetch every stored reference text with its batch id and name.
+
+	Returns a list of dicts:
+		{
+			"raw_text":    str,
+			"cleaned_text": str,
+			"batch_id":    str,
+			"batch_name":  str | None,
+		}
+	"""
+	pool = await _get_pool()
+	async with pool.acquire() as conn:
+		rows = await conn.fetch(
+			"""
+			select rt.raw_text, rt.cleaned_text, rt.batch_id, rb.name as batch_name
+			from reference_text rt
+			join reference_batch rb on rb.id = rt.batch_id
+			order by rb.created_at desc, rt.id;
+			"""
+		)
+		return [
+			{
+				"raw_text": r["raw_text"],
+				"cleaned_text": r["cleaned_text"],
+				"batch_id": str(r["batch_id"]),
+				"batch_name": r["batch_name"],
+			}
+			for r in rows
+		]
