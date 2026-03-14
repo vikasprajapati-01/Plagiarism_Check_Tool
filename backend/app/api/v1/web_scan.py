@@ -94,6 +94,7 @@ async def web_scan_single(
         )
 
     return {
+        "submitted_text": result.submitted_text,
         "is_plagiarism": result.is_plagiarism,
         "best_score": result.best_score,
         "best_url": result.best_url,
@@ -107,6 +108,7 @@ async def web_scan_single(
                 "page_excerpt": m.page_excerpt,
                 "similarity_scores": m.similarity_scores,
                 "best_score": m.best_score,
+                "fingerprint": m.fingerprint,
             }
             for m in result.matches
         ],

@@ -11,6 +11,8 @@ from app.services.detect import is_exact_duplicate
 from app.services.fuzzy import is_fuzzy_duplicate, find_fuzzy_duplicates_in_batch
 from app.services.embeddings import is_semantic_duplicate, find_semantic_duplicates_in_batch, is_available as embeddings_available
 from app.services.reports import DetectionResult, classify_risk, generate_report_bytes, _OPENPYXL_AVAILABLE
+from app.services import word2vec as word2vec_service
+from app.services import clustering as clustering_service
 from app.storage.repository import (
     async_fetch_all_texts_by_batch,
     async_get_batch_id_by_name,
@@ -486,3 +488,152 @@ async def detect_cross_batch_duplicates(request: CrossBatchRequest):
         "threshold":        request.threshold,
         "results":          results,
     }
+
+
+# ==============================================================================
+# WORD2VEC / GLOVE BATCH DUPLICATE DETECTION
+# ==============================================================================
+
+class BatchWord2VecRequest(BaseModel):
+    texts: list[str]
+    threshold: float = 0.85
+    download_report: bool = False
+
+
+@app.post("/batch-word2vec")
+async def detect_batch_word2vec_duplicates(request: BatchWord2VecRequest):
+    """Find near-duplicate pairs in a batch using Word2Vec/GloVe cosine similarity.
+
+    Requires a model to be available (set WORD2VEC_MODEL env var to a file path
+    or a gensim model name like 'glove-wiki-gigaword-100').
+    """
+    if not word2vec_service.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="gensim not installed. Run: pip install gensim",
+        )
+
+    if len(request.texts) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 texts for batch comparison")
+
+    try:
+        duplicates = word2vec_service.find_duplicates_in_batch(
+            request.texts,
+            threshold=request.threshold,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    if request.download_report:
+        if not _OPENPYXL_AVAILABLE:
+            raise HTTPException(status_code=503, detail="openpyxl not installed. Run: pip install openpyxl")
+        seen: set[int] = set()
+        results = []
+        for i, j, score in duplicates:
+            for idx, other_idx in [(i, j), (j, i)]:
+                if idx not in seen:
+                    seen.add(idx)
+                    results.append(DetectionResult(
+                        text=request.texts[idx],
+                        is_duplicate=True,
+                        similarity_scores={"word2vec_cosine": score},
+                        source=request.texts[other_idx],
+                        risk_level=classify_risk(score),
+                        detection_method="word2vec",
+                    ))
+        for idx, t in enumerate(request.texts):
+            if idx not in seen:
+                results.append(DetectionResult(
+                    text=t,
+                    is_duplicate=False,
+                    risk_level="none",
+                    detection_method="word2vec",
+                ))
+        report_bytes = generate_report_bytes(results)
+        return StreamingResponse(
+            io.BytesIO(report_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=word2vec_report.xlsx"},
+        )
+
+    return {
+        "total_texts": len(request.texts),
+        "duplicate_pairs": len(duplicates),
+        "threshold": request.threshold,
+        "duplicates": [
+            {
+                "index1": i,
+                "index2": j,
+                "text1": request.texts[i],
+                "text2": request.texts[j],
+                "word2vec_cosine": score,
+            }
+            for i, j, score in duplicates
+        ],
+    }
+
+
+# ==============================================================================
+# CLUSTERING — DBSCAN / K-MEANS
+# ==============================================================================
+
+class ClusterRequest(BaseModel):
+    texts: list[str]
+    method: str = "dbscan"     # "dbscan" or "kmeans"
+    eps: float = 0.25          # DBSCAN only — cosine distance threshold
+    min_samples: int = 2       # DBSCAN only — minimum cluster size
+    n_clusters: int = 5        # K-means only — number of clusters
+
+
+@app.post("/cluster")
+async def cluster_texts(request: ClusterRequest):
+    """Group a batch of texts into similarity clusters using DBSCAN or K-means.
+
+    Uses SBERT embeddings internally.
+    DBSCAN: auto-detects number of clusters; label -1 means noise (no group).
+    K-means: groups into exactly n_clusters.
+    """
+    if not clustering_service.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="scikit-learn not installed. Run: pip install scikit-learn",
+        )
+
+    if not embeddings_available():
+        raise HTTPException(
+            status_code=503,
+            detail="sentence-transformers not installed. Run: pip install sentence-transformers",
+        )
+
+    if len(request.texts) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 texts to cluster")
+
+    method = request.method.lower()
+    if method not in ("dbscan", "kmeans"):
+        raise HTTPException(status_code=400, detail="method must be 'dbscan' or 'kmeans'")
+
+    try:
+        if method == "dbscan":
+            clusters = clustering_service.cluster_dbscan(
+                request.texts,
+                eps=request.eps,
+                min_samples=request.min_samples,
+            )
+        else:
+            clusters = clustering_service.cluster_kmeans(
+                request.texts,
+                n_clusters=request.n_clusters,
+            )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    formatted = clustering_service.format_clusters(clusters, request.texts)
+
+    return {
+        "total_texts": len(request.texts),
+        "total_clusters": sum(1 for cid in clusters if cid != -1),
+        "noise_count": len(clusters.get(-1, [])),   # DBSCAN only; 0 for K-means
+        "method": method,
+        "clusters": formatted,
+    }
+

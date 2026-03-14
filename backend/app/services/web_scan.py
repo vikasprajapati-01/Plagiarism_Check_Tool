@@ -12,6 +12,7 @@ import requests
 
 from app.services.fuzzy import jaccard_similarity, ngram_similarity, levenshtein_similarity
 from app.services.preprocess import preprocess_text
+from app.services import web_fingerprint
 
 
 # bs4 is needed to parse fetched pages
@@ -45,6 +46,7 @@ class WebMatch:
     similarity_scores: dict = field(default_factory=dict)
     best_score: float = 0.0
     is_plagiarism: bool = False
+    fingerprint: dict = field(default_factory=dict)  # content hash, domain, published_at
 
 
 @dataclass
@@ -99,19 +101,21 @@ def _search_ddg_sync(query: str, max_results: int = 10) -> List[dict]:
     ]
 
 
-def _fetch_page_text_sync(url: str, timeout: int = 8) -> str:
-    """Download a page and return its visible text, stripped of navigation/scripts."""
+def _fetch_page_text_sync(url: str, timeout: int = 8) -> tuple:
+    """Download a page and return (visible_text, raw_html). Both empty string on failure."""
     if not _BS4_AVAILABLE:
-        return ""
+        return "", ""
     try:
         resp = requests.get(url, timeout=timeout, headers=_HEADERS)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        raw_html = resp.text
+        soup = BeautifulSoup(raw_html, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
-        return re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True)).strip()
+        page_text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True)).strip()
+        return page_text, raw_html
     except Exception:
-        return ""
+        return "", ""
 
 
 def _windowed_similarity(query: str, page_text: str) -> dict:
@@ -204,7 +208,7 @@ async def scan_text_online(
         title = result_dict.get("title", "")
         snippet = result_dict.get("body", "")
 
-        page_text = await loop.run_in_executor(_EXECUTOR, _fetch_page_text_sync, url)
+        page_text, raw_html = await loop.run_in_executor(_EXECUTOR, _fetch_page_text_sync, url)
         comparison_text = page_text if page_text else snippet
         if not comparison_text:
             return None
@@ -222,6 +226,7 @@ async def scan_text_online(
             similarity_scores=scores,
             best_score=round(best_score, 4),
             is_plagiarism=True,
+            fingerprint=web_fingerprint.analyze(url, page_text, raw_html),
         )
 
     raw_results = await asyncio.gather(*[_process(r) for r in search_results], return_exceptions=True)
