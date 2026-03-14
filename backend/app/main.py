@@ -6,6 +6,7 @@ from app.api.v1.detect import app as detect_router
 from app.api.v1.ai_detect import app as ai_detect_router
 from app.api.v1.web_scan import app as web_scan_router
 from app.api.v1.reports import app as reports_router
+from app.api.v1.license_check import app as license_check_router
 
 app = FastAPI(title="Plagiarism Check Tool API")
 
@@ -28,3 +29,4 @@ app.include_router(detect_router, prefix="/api/v1/detect", tags=["Detect"])
 app.include_router(ai_detect_router, prefix="/api/v1/ai-detect", tags=["AI Detection"])
 app.include_router(web_scan_router, prefix="/api/v1/web-scan", tags=["Web Scan"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
+app.include_router(license_check_router, prefix="/api/v1/license-check", tags=["License Check"])
