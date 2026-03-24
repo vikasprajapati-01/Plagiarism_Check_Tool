@@ -6,6 +6,8 @@ import {
   TextAreaField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
 type InputMode = "text" | "file";
 
 export default function LicenseCheckPage() {
@@ -36,7 +38,7 @@ export default function LicenseCheckPage() {
       fd.append("download_report", String(downloadReport));
       fd.append("download_format", downloadFormat);
 
-      const res = await fetch("http://localhost:8000/api/v1/license-check/check", { method: "POST", body: fd });
+      const res = await fetch(`${API_BASE}/api/v1/license-check/check`, { method: "POST", body: fd });
       if (!res.ok) { const d = await res.json(); throw new Error(d.detail || "Request failed"); }
       if (downloadReport) {
         const blob = await res.blob();

@@ -6,6 +6,8 @@ import {
   TextAreaField, InputField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
 type Mode = "single" | "batch-within";
 type Scope = "global" | "batch-name" | "batch-id";
 
@@ -36,10 +38,10 @@ export default function SemanticDetectPage() {
         if (scope === "batch-name" && batchName) fd.append("batch_name", batchName.trim());
         fd.append("download_report", String(downloadReport));
         fd.append("download_format", downloadFormat);
-        res = await fetch("http://localhost:8000/api/v1/detect/semantic", { method: "POST", body: fd });
+        res = await fetch(`${API_BASE}/api/v1/detect/semantic`, { method: "POST", body: fd });
       } else {
         const texts = batchTexts.split("\n").map((t) => t.trim()).filter(Boolean);
-        res = await fetch("http://localhost:8000/api/v1/detect/batch-semantic", {
+        res = await fetch(`${API_BASE}/api/v1/detect/batch-semantic`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ texts, threshold, download_report: downloadReport, download_format: downloadFormat }),

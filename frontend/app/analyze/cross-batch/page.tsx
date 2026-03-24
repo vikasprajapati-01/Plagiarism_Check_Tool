@@ -6,6 +6,8 @@ import {
   TextAreaField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
 type Method = "exact" | "fuzzy" | "semantic";
 
 export default function CrossBatchPage() {
@@ -24,7 +26,7 @@ export default function CrossBatchPage() {
     const textList = texts.split("\n").map((t) => t.trim()).filter(Boolean);
     if (!textList.length) { setError("Please enter at least one text."); setLoading(false); return; }
     try {
-      const res = await fetch("http://localhost:8000/api/v1/detect/cross-batch", {
+      const res = await fetch(`${API_BASE}/api/v1/detect/cross-batch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ texts: textList, method, threshold, download_report: downloadReport, download_format: downloadFormat }),

@@ -6,6 +6,8 @@ import {
   TextAreaField, InputField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
 type Mode = "single" | "batch";
 
 export default function WebScanPage() {
@@ -34,10 +36,10 @@ export default function WebScanPage() {
         fd.append("max_results_per_query", String(maxResultsPerQuery));
         fd.append("download_report", String(downloadReport));
         fd.append("download_format", downloadFormat);
-        res = await fetch("http://localhost:8000/api/v1/web-scan/scan", { method: "POST", body: fd });
+        res = await fetch(`${API_BASE}/api/v1/web-scan/scan`, { method: "POST", body: fd });
       } else {
         const texts = batchTexts.split("\n").map((t) => t.trim()).filter(Boolean);
-        res = await fetch("http://localhost:8000/api/v1/web-scan/batch-scan", {
+        res = await fetch(`${API_BASE}/api/v1/web-scan/batch-scan`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ texts, threshold, max_queries: maxQueries, max_results_per_query: maxResultsPerQuery, download_report: downloadReport, download_format: downloadFormat }),
