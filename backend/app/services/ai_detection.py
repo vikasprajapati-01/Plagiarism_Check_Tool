@@ -11,8 +11,7 @@ from typing import Optional, Tuple
 
 from transformers import pipeline as hf_pipeline
 
-_DEFAULT_MODEL = "roberta-base-openai-detector"
-# _DEFAULT_MODEL = "roberta-large-openai-detector"
+_DEFAULT_MODEL = "openai-community/roberta-large-openai-detector"
 
 
 # ── Model Loading ─────────────────────────────────────────────────────────────

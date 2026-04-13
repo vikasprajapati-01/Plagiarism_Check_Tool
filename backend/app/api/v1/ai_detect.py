@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.services.ai_detection import detect_ai_content, detect_ai_batch, is_available
+from app.services.preprocess import read_all_text_from_file
 from app.services.reports import (
     DetectionResult,
     classify_risk,
@@ -80,27 +81,11 @@ def _build_report_response(
     )
 
 
-def _read_rows_from_file(filename: str, contents: bytes) -> list[str]:
-    """Parse uploaded files (csv, xlsx, txt) into a list of strings."""
-    if filename.endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(contents))
-        first_column = df.columns[0]
-        return df[first_column].dropna().astype(str).tolist()
-    if filename.endswith(".xlsx") or filename.endswith(".xls"):
-        df = pd.read_excel(io.BytesIO(contents))
-        first_column = df.columns[0]
-        return df[first_column].dropna().astype(str).tolist()
-    if filename.endswith(".txt"):
-        text_data = contents.decode("utf-8").splitlines()
-        return [line.strip() for line in text_data if line.strip()]
-    raise ValueError("Unsupported file format")
-
-
 @app.get("/")
 async def ai_detect_root():
     return {
         "message": "AI Detection endpoint",
-        "model": "roberta-base-openai-detector",
+        "model": "openai-community/roberta-large-openai-detector",
         "available": is_available(),
     }
 
@@ -118,12 +103,11 @@ async def check_ai_content(
             detail="AI detection model unavailable. Install: pip install transformers torch",
         )
 
-    # Case 1: file upload → batch detect
+    # Case 1: file upload → batch detect across all text columns
     if file is not None:
         contents = await file.read()
-        filename = file.filename.lower()
         try:
-            rows = _read_rows_from_file(filename, contents)
+            rows, columns_read = read_all_text_from_file(file.filename, contents)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -153,6 +137,7 @@ async def check_ai_content(
                 return response
         return {
             "total": len(results),
+            "columns_read": columns_read,
             "results": [
                 {"text_preview": text_row[:80], **res}
                 for text_row, res in zip(rows, results)
@@ -190,6 +175,7 @@ async def check_ai_content(
     # No input provided
     raise HTTPException(status_code=400, detail="Provide either text or a file upload")
 
+
 @app.post("/batch-check")
 async def check_ai_content_batch(
     request: BatchAIRequest | None = None,
@@ -204,18 +190,19 @@ async def check_ai_content_batch(
         )
 
     rows: list[str] = []
+    columns_read: list[str] = []
 
-    # Case 1: file upload
+    # Case 1: file upload — read all text columns
     if file is not None:
         contents = await file.read()
-        filename = file.filename.lower()
         try:
-            rows = _read_rows_from_file(filename, contents)
+            rows, columns_read = read_all_text_from_file(file.filename, contents)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     # Case 2: JSON payload of texts
     elif request is not None and request.texts:
         rows = request.texts
+        columns_read = ["direct_input"]
     else:
         raise HTTPException(status_code=400, detail="Provide either texts or a file upload")
 
@@ -253,11 +240,12 @@ async def check_ai_content_batch(
 
     return {
         "total": len(results),
+        "columns_read": columns_read,
         "results": [
             {
-                "text_preview": text[:80],
+                "text_preview": text_row[:80],
                 **result,
             }
-            for text, result in zip(rows, results)
+            for text_row, result in zip(rows, results)
         ],
     }
