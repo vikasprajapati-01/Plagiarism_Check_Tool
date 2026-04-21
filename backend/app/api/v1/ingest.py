@@ -1,46 +1,43 @@
-"""Ingestion endpoints for uploading or passing raw text data."""
+"""Ingestion endpoints — file upload, preprocessing, and batch registration.
+
+Updated from api/v1/ingest.py:
+  - Imports now use the renamed preprocessor.py and exact_match.py modules.
+  - Model loading uses app.state instead of calling get_model() per-request.
+  - encode_texts now accepts an explicit model parameter.
+"""
 
 import io
-import os
+import logging
 import zipfile
 from typing import Annotated, List, Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.services.preprocess import preprocess_texts, read_all_text_from_file
-from app.services.detect import sha256_hash
-from app.services.embeddings import get_model, encode_texts, is_available
+from app.services.preprocessor import preprocess_texts, read_all_text_from_file
+from app.services.exact_match import sha256_hash
+from app.services.semantic_match import encode_texts
 from app.storage.repository import (
     async_create_batch,
     async_insert_embeddings,
     async_insert_reference_texts,
 )
 
-app = APIRouter()
+logger = logging.getLogger(__name__)
+router = APIRouter()
 
 _EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-@app.get("/")
-async def ingest_root():
-    return {"message": "Ingest endpoint"}
-
-
-# ==============================================================================
-# HELPERS
-# ==============================================================================
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _collect_rows_from_uploads(
     files: List[UploadFile],
 ) -> tuple[List[str], List[dict]]:
-    """
-    Read all text rows from a list of uploaded files.
+    """Read all text rows from a list of uploaded files.
 
-    Returns:
-        rows          – flat list of all text values across all files
-        file_summary  – per-file metadata: {filename, columns_read, row_count}
+    Returns (rows, file_summary) where file_summary is per-file metadata.
     """
     all_rows: List[str] = []
     file_summary: List[dict] = []
@@ -48,12 +45,12 @@ async def _collect_rows_from_uploads(
     for upload in files:
         contents = await upload.read()
         try:
-            rows, columns = read_all_text_from_file(upload.filename, contents)
-        except Exception as e:
+            rows, columns = read_all_text_from_file(upload.filename or "upload.txt", contents)
+        except Exception as exc:
             raise HTTPException(
                 status_code=400,
-                detail=f"Error reading '{upload.filename}': {e}",
-            )
+                detail=f"Error reading '{upload.filename}': {exc}",
+            ) from exc
         all_rows.extend(rows)
         file_summary.append({
             "filename": upload.filename,
@@ -64,32 +61,25 @@ async def _collect_rows_from_uploads(
     return all_rows, file_summary
 
 
-# ==============================================================================
-# INPUT DATA  — preview + preprocess without storing
-# ==============================================================================
+# ── Preview endpoint ──────────────────────────────────────────────────────────
 
-@app.post("/input/data")
+@router.post("/input/data")
 async def input_data(
     files: Annotated[
         List[UploadFile],
-        File(description="One or more CSV / XLSX / TXT files. Click 'Add item' in Swagger to add each file."),
+        File(description="One or more CSV / XLSX / TXT files."),
     ] = [],
     texts: Optional[str] = Form(None),
 ):
-    """
-    Accept one or more files (CSV/XLSX/TXT) or comma-separated text.
-    Returns original and preprocessed data from ALL rows and text columns.
-    """
+    """Accept files or comma-separated text and return original + preprocessed data."""
     rows: List[str] = []
     file_summary: List[dict] = []
 
     if files:
         rows, file_summary = await _collect_rows_from_uploads(files)
-
     elif texts:
         rows = [t.strip() for t in texts.split(",") if t.strip()]
         file_summary = [{"filename": "direct_input", "columns_read": ["text"], "row_count": len(rows)}]
-
     else:
         return {"status": "No input provided"}
 
@@ -105,38 +95,27 @@ async def input_data(
     }
 
 
-# ==============================================================================
-# PREPROCESS  — clean file/text and optionally download result
-# ==============================================================================
+# ── Preprocess + optional download ───────────────────────────────────────────
 
-@app.post("/preprocess")
+@router.post("/preprocess")
 async def preprocess_data(
     files: Annotated[
         List[UploadFile],
-        File(description="One or more CSV / XLSX / TXT files. Click 'Add item' in Swagger to add each file."),
+        File(description="One or more CSV / XLSX / TXT files."),
     ] = [],
     texts: Optional[str] = Form(None),
-    download_format: str = Form("none"),   # "none" | "csv" | "excel" | "both"
-    preview_limit: int = Form(50),         # max rows shown in JSON preview
+    download_format: str = Form("none"),  # "none" | "csv" | "excel" | "both"
+    preview_limit: int = Form(50),
 ):
-    """
-    Normalize and clean text from one or more uploaded files or direct text input.
-
-    - Reads ALL text columns from every uploaded CSV / XLSX / XLS / TXT file.
-    - Strips punctuation, lowercases, removes stop words (Unicode-safe).
-    - Returns a JSON preview of original → cleaned pairs.
-    - Use download_format=csv|excel|both to also download the full cleaned dataset.
-    """
+    """Normalize and clean text. Optionally download as CSV or Excel."""
     rows: List[str] = []
     file_summary: List[dict] = []
 
     if files:
         rows, file_summary = await _collect_rows_from_uploads(files)
-
     elif texts:
         rows = [t.strip() for t in texts.split(",") if t.strip()]
         file_summary = [{"filename": "direct_input", "columns_read": ["text"], "row_count": len(rows)}]
-
     else:
         raise HTTPException(status_code=400, detail="Provide at least one file or text input.")
 
@@ -144,12 +123,10 @@ async def preprocess_data(
         raise HTTPException(status_code=400, detail="No text found in the provided input.")
 
     cleaned_rows = preprocess_texts(rows)
-
-    # ── Build download file ────────────────────────────────────────────────────
     fmt = download_format.lower()
 
     def _make_df() -> pd.DataFrame:
-        source_labels = []
+        source_labels: List[str] = []
         for fs in file_summary:
             source_labels.extend([fs["filename"]] * fs["row_count"])
         return pd.DataFrame({
@@ -192,7 +169,7 @@ async def preprocess_data(
             headers={"Content-Disposition": "attachment; filename=preprocessed_data.zip"},
         )
 
-    # ── JSON preview (default) ────────────────────────────────────────────────
+    # Default: JSON preview
     preview = [
         {"original": orig, "cleaned": clean}
         for orig, clean in list(zip(rows, cleaned_rows))[:preview_limit]
@@ -206,97 +183,74 @@ async def preprocess_data(
         "preview_shown": len(preview),
         "note": (
             f"Showing first {preview_limit} of {len(rows)} entries. "
-            "Use download_format=csv|excel|both to get the full dataset."
-            if len(rows) > preview_limit else
-            "All entries shown."
+            "Use download_format=csv|excel|both for the full dataset."
+            if len(rows) > preview_limit else "All entries shown."
         ),
         "preview": preview,
     }
 
 
-# ==============================================================================
-# REFERENCE REGISTER  — store batches in the database for detection comparisons
-# ==============================================================================
+# ── Reference batch registration ──────────────────────────────────────────────
 
-@app.post("/reference/register")
+@router.post("/reference/register")
 async def register_reference(
+    request: Request,
     files: Annotated[
         List[UploadFile],
-        File(description="One or more CSV / XLSX / TXT files. Click 'Add item' in Swagger to add each file."),
+        File(description="One or more CSV / XLSX / TXT files."),
     ] = [],
     texts: Optional[str] = Form(None),
     batch_name: Optional[str] = Form(None),
     build_embeddings: bool = Form(True),
     merge_files: bool = Form(False),
 ):
-    """
-    Register one or more files as reference batches in the database.
+    """Register one or more files as reference batches in the database.
 
-    - merge_files=False (default): each file becomes its own batch
-      named after its filename (or batch_name-1, batch_name-2 if batch_name given).
-    - merge_files=True: all files are merged into a single batch
-      named by batch_name (or 'merged_batch' if not provided).
+    - merge_files=False (default): each file becomes its own batch.
+    - merge_files=True: all files are merged into a single batch.
     """
     if not files and not texts:
         return {"status": "No reference input provided"}
 
-    # ── Direct text input: single batch ───────────────────────────────────────
+    sbert_model = getattr(request.app.state, "sbert_model", None)
+
     if texts and not files:
         rows = [t.strip() for t in texts.split(",") if t.strip()]
-        return await _register_single_batch(
-            rows=rows,
-            columns=["direct_input"],
-            batch_name=batch_name,
-            build_embeddings=build_embeddings,
-        )
+        return await _register_single_batch(rows, ["direct_input"], batch_name, build_embeddings, sbert_model)
 
-    # ── File uploads ──────────────────────────────────────────────────────────
     if merge_files:
-        # All files → one batch
         all_rows, file_summary = await _collect_rows_from_uploads(files)
         merged_name = batch_name or "merged_batch"
         result = await _register_single_batch(
-            rows=all_rows,
-            columns=[f["filename"] for f in file_summary],
-            batch_name=merged_name,
-            build_embeddings=build_embeddings,
+            all_rows,
+            [f["filename"] for f in file_summary],
+            merged_name,
+            build_embeddings,
+            sbert_model,
         )
         result["files"] = file_summary
         result["merge_mode"] = True
         return result
 
-    else:
-        # Each file → its own batch
-        batches = []
-        for i, upload in enumerate(files):
-            contents = await upload.read()
-            try:
-                rows, columns = read_all_text_from_file(upload.filename, contents)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Error reading '{upload.filename}': {e}",
-                )
-            # Name: explicit batch_name with suffix, or just the filename
-            if batch_name:
-                name = f"{batch_name}-{i + 1}" if len(files) > 1 else batch_name
-            else:
-                name = upload.filename
+    batches = []
+    for i, upload in enumerate(files):
+        contents = await upload.read()
+        try:
+            rows, columns = read_all_text_from_file(upload.filename or "upload.txt", contents)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error reading '{upload.filename}': {exc}",
+            ) from exc
 
-            result = await _register_single_batch(
-                rows=rows,
-                columns=columns,
-                batch_name=name,
-                build_embeddings=build_embeddings,
-            )
-            batches.append(result)
+        name = (
+            f"{batch_name}-{i + 1}" if batch_name and len(files) > 1
+            else batch_name or upload.filename
+        )
+        result = await _register_single_batch(rows, columns, name, build_embeddings, sbert_model)
+        batches.append(result)
 
-        return {
-            "status": "All batches registered",
-            "total_files": len(files),
-            "merge_mode": False,
-            "batches": batches,
-        }
+    return {"status": "All batches registered", "total_files": len(files), "merge_mode": False, "batches": batches}
 
 
 async def _register_single_batch(
@@ -304,6 +258,7 @@ async def _register_single_batch(
     columns: List[str],
     batch_name: Optional[str],
     build_embeddings: bool,
+    sbert_model,
 ) -> dict:
     """Insert one batch of rows into the database and optionally build embeddings."""
     cleaned_rows = preprocess_texts(rows)
@@ -314,12 +269,8 @@ async def _register_single_batch(
     ref_ids = await async_insert_reference_texts(batch_id, items)
 
     embeddings_built = False
-    model_name_used = None
-
-    if build_embeddings and is_available():
-        get_model()
-        model_name_used = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-        emb_vecs = encode_texts(cleaned_rows, preprocess=False)
+    if build_embeddings and sbert_model is not None:
+        emb_vecs = encode_texts(cleaned_rows, model=sbert_model, do_preprocess=False)
         pairs = [(rid, vec) for rid, vec in zip(ref_ids, emb_vecs)]
         await async_insert_embeddings(pairs)
         embeddings_built = True
@@ -331,5 +282,4 @@ async def _register_single_batch(
         "columns_read": columns,
         "total_rows": len(rows),
         "embeddings_built": embeddings_built,
-        "model": model_name_used,
     }

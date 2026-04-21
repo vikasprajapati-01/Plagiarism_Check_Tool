@@ -1,4 +1,7 @@
-"""Text normalization and file-reading utilities for ingestion and detection pipelines."""
+"""Text normalisation and file-reading utilities for ingestion and detection pipelines.
+
+Logic preserved — identical to services/preprocess.py.
+"""
 
 import io
 import re
@@ -17,7 +20,7 @@ STOP_WORDS = {
 
 
 def _normalize_unicode(text: str) -> str:
-    # NFKC collapses visually similar forms (e.g., full-width) to improve matching.
+    """Collapse visually similar Unicode forms (e.g. full-width) via NFKC."""
     return unicodedata.normalize("NFKC", text)
 
 
@@ -39,7 +42,7 @@ def preprocess_text(text: str) -> str:
 
 
 def preprocess_texts(texts: Iterable[str]) -> List[str]:
-    """Vectorized wrapper over ``preprocess_text`` preserving order."""
+    """Vectorized wrapper over preprocess_text preserving order."""
     return [preprocess_text(text) for text in texts]
 
 
@@ -49,8 +52,7 @@ def read_all_text_from_file(
     filename: str,
     contents: bytes,
 ) -> Tuple[List[str], List[str]]:
-    """
-    Read every text value from ALL columns in a CSV, XLSX/XLS, or TXT file.
+    """Read every text value from ALL columns in a CSV, XLSX/XLS, or TXT file.
 
     Pure-numeric columns (e.g. prices, IDs) are automatically skipped.
     Each non-null cell in a text column becomes one entry in the returned list.
