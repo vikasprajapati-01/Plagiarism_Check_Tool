@@ -1,26 +1,26 @@
-# Plagiarism & Duplicate Detection Tool — Architecture Document
+# Plagiarism & Duplicate Detection Tool
 
-> **Samsung PRISM Research Project**  
+**Samsung PRISM Research Project**
 
----
+This project provides a unified plagiarism and duplicate detection pipeline for Excel/CSV/TXT datasets. It ingests files, normalizes content, stores per-cell provenance in PostgreSQL (Supabase + pgvector), and runs exact, fuzzy, semantic, AI detection, web scanning, and license checks to generate structured results and multi-sheet reports.
 
 ## Table of Contents
 
-1. [Problem Statement](#1-problem-statement)
-2. [System Overview](#2-system-overview)
-3. [Tech Stack](#3-tech-stack)
-4. [Repository Structure](#4-repository-structure)
-5. [Architecture Diagram](#5-architecture-diagram)
-6. [Data Flow](#6-data-flow)
-7. [Detection Methods](#7-detection-methods)
-8. [API Reference](#8-api-reference)
-9. [Database Schema](#9-database-schema)
-10. [Configuration](#10-configuration)
-11. [How to Run Locally](#11-how-to-run-locally)
+1. [Problem Statement](#problem-statement)
+2. [System Overview](#system-overview)
+3. [Tech Stack](#tech-stack)
+4. [Repository Structure](#repository-structure)
+5. [Database Schema](#database-schema)
+6. [Data Flow](#data-flow)
+7. [Detection Methods](#detection-methods)
+8. [API Reference](#api-reference)
+9. [Pipeline Output Format](#pipeline-output-format)
+10. [Combined Report Format](#combined-report-format)
+11. [Configuration](#configuration)
+12. [How to Run Locally](#how-to-run-locally)
+13. [Key Design Decisions](#key-design-decisions)
 
----
-
-## 1. Problem Statement
+## Problem Statement
 
 Large-scale AI training datasets sourced from Excel sheets often contain:
 - **Exact duplicate** entries (identical copy-paste records)
@@ -32,491 +32,315 @@ Large-scale AI training datasets sourced from Excel sheets often contain:
 
 This tool detects all of the above, produces structured reports, and ensures data quality before training.
 
----
-
-## 2. System Overview
-
-The system has two main components:
+## System Overview
 
 | Component | Technology | Role |
 |---|---|---|
-| **Backend** | Python, FastAPI | All detection logic, database, APIs |
-| **Frontend** | Next.js (TypeScript) | User interface for uploading data, viewing results |
+| Backend | Python, FastAPI | Detection services, database access, APIs |
+| Frontend | Next.js (TypeScript) | Upload UI, per-method analysis pages (refactor pending) |
+| Database | PostgreSQL + pgvector (Supabase) | Batches, per-cell data, embeddings, pipeline results |
 
-The backend is the core of the system. The frontend communicates with it via HTTP.
-
----
-
-## 3. Tech Stack
+## Tech Stack
 
 ### Backend
 | Library | Purpose |
 |---|---|
-| **FastAPI** | REST API framework (async, high performance) |
-| **PostgreSQL + pgvector** | Relational database + vector storage for semantic embeddings |
-| **asyncpg / psycopg2** | Async and sync PostgreSQL drivers |
-| **pandas** | Reading and processing Excel / CSV files |
-| **sentence-transformers** | SBERT model for semantic embeddings (`all-MiniLM-L6-v2`) |
-| **transformers (HuggingFace)** | AI-generated content detection (`roberta-large-openai-detector`) |
-| **scikit-learn** | DBSCAN and K-Means clustering |
-| **gensim** | Word2Vec / GloVe word embeddings |
-| **ddgs / BeautifulSoup4** | Web search (DuckDuckGo) + page text extraction |
-| **openpyxl** | Excel report generation |
-| **python-dotenv** | Environment variable management |
+| FastAPI | REST API framework (async) |
+| PostgreSQL + pgvector | Relational data + vector embeddings |
+| asyncpg / psycopg2 | Async and sync Postgres drivers |
+| pandas | Excel/CSV ingestion and cleaning |
+| sentence-transformers | SBERT semantic similarity (all-MiniLM-L6-v2) |
+| transformers | AI-generated content detection (RoBERTa) |
+| openpyxl | Excel report export |
+| python-dotenv | Environment management |
+| ddgs / BeautifulSoup4 | Web search + page text extraction |
+| scikit-learn | Used internally by some detection services |
 
 ### Frontend
 | Library | Purpose |
 |---|---|
-| **Next.js 14 (App Router)** | React framework with server components |
-| **TypeScript** | Type-safe JavaScript |
-| **Tailwind CSS** | Styling |
+| Next.js 14 (App Router) | React framework |
+| TypeScript | Type-safe frontend code |
+| Tailwind CSS | Styling |
 
----
-
-## 4. Repository Structure
+## Repository Structure
 
 ```
-Plagiarism_Tool/
-├── backend/
-│   ├── .env                        # Local environment variables (not committed)
-│   ├── .env.example                # Template for environment setup
-│   ├── requirements.txt            # Python dependencies
-│   └── app/
-│       ├── main.py                 # FastAPI app entry point — mounts all routers
-│       ├── api/
-│       │   └── v1/
-│       │       ├── ingest.py       # File upload, preprocessing, reference registration
-│       │       ├── detect.py       # Exact / fuzzy / semantic / cross-batch detection
-│       │       ├── ai_detect.py    # AI-generated content detection
-│       │       ├── web_scan.py     # Web plagiarism scanning (DuckDuckGo)
-│       │       ├── license_check.py# License and copyright detection
-│       │       └── reports.py      # Report generation endpoints
-│       ├── services/
-│       │   ├── preprocess.py       # Text normalization + shared file reader
-│       │   ├── detect.py           # SHA-256 exact duplicate logic
-│       │   ├── fuzzy.py            # Levenshtein, Jaccard, N-gram, Hamming
-│       │   ├── embeddings.py       # SBERT encoding + cosine similarity
-│       │   ├── word2vec.py         # Word2Vec / GloVe similarity
-│       │   ├── clustering.py       # DBSCAN and K-Means clustering
-│       │   ├── ai_detection.py     # HuggingFace AI content classifier
-│       │   ├── web_scan.py         # Web search + similarity scoring
-│       │   ├── web_fingerprint.py  # Content hashing + domain metadata
-│       │   ├── license_check.py    # SPDX license + copyright detection
-│       │   └── reports.py          # DetectionResult model + Excel/CSV export
-│       └── storage/
-│           └── repository.py       # All database queries (asyncpg pool)
-└── frontend/
-    └── app/
-        ├── layout.tsx
-        ├── page.tsx
-        ├── components/             # Navbar, Hero, About, Footer, DetectionSelector
-        └── analyze/                # Per-method analyzer pages
-            ├── exact/
-            ├── fuzzy/
-            ├── semantic/
-            ├── ai-detect/
-            ├── web-scan/
-            ├── license/
-            └── cross-batch/
+backend/
+├── .env
+├── .env.example
+├── requirements.txt
+└── app/
+        ├── main.py                      # FastAPI entry, lifespan model loading
+        ├── core/
+        │   ├── config.py                # pydantic-settings, all env vars
+        │   ├── models.py                # shared Pydantic schemas
+        │   └── model_cache.py           # SBERT + RoBERTa loaded once
+        ├── api/
+        │   └── v1/
+        │       ├── router.py            # includes all sub-routers
+        │       ├── batches.py           # list/delete/rename batches
+        │       ├── ingest.py            # file upload, preprocessing, registration
+        │       ├── pipeline.py          # POST /pipeline/run
+        │       └── reports.py           # combined report download
+        ├── services/
+        │   ├── preprocessor.py          # reads Excel/CSV/TXT with cell positions
+        │   ├── exact_match.py           # SHA-256 exact duplicate detection
+        │   ├── fuzzy_match.py           # Levenshtein, Jaccard, N-gram, Hamming
+        │   ├── semantic_match.py        # SBERT cosine similarity
+        │   ├── ai_detector.py           # RoBERTa AI content detection
+        │   ├── web_scanner.py           # DuckDuckGo + BeautifulSoup web scan
+        │   ├── license_detector.py      # SPDX + copyright detection
+        │   └── pipeline_runner.py       # orchestrates pipeline execution
+        └── storage/
+                └── repository.py            # all DB queries via asyncpg pool
+
+frontend/app/
+├── layout.tsx
+├── page.tsx
+├── components/
+│   ├── Navbar.tsx
+│   ├── Hero.tsx
+│   ├── About.tsx
+│   ├── Footer.tsx
+│   └── DetectionSelector.tsx
+└── analyze/
+        ├── exact/page.tsx
+        ├── fuzzy/page.tsx
+        ├── semantic/page.tsx
+        ├── ai-detect/page.tsx
+        ├── web-scan/page.tsx
+        ├── license/page.tsx
+        └── cross-batch/page.tsx
 ```
 
----
-
-## 5. Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  Frontend (Next.js)                  │
-│  Upload Files │ View Results │ Download Reports       │
-└──────────────────────┬──────────────────────────────┘
-                       │  HTTP / REST
-┌──────────────────────▼──────────────────────────────┐
-│               FastAPI Backend                        │
-│                                                      │
-│  ┌─────────────┐   ┌────────────────────────────┐   │
-│  │   Ingest    │   │      Detection Layer        │   │
-│  │─────────────│   │────────────────────────────│   │
-│  │ /input/data │   │ /detect/exact               │   │
-│  │ /preprocess │   │ /detect/fuzzy               │   │
-│  │ /reference/ │   │ /detect/semantic            │   │
-│  │   register  │   │ /detect/cross-batch         │   │
-│  └──────┬──────┘   │ /detect/cluster             │   │
-│         │          │ /ai-detect/check            │   │
-│  ┌──────▼──────────│ /web-scan/scan              │   │
-│  │  Preprocessing  │ /license-check/check        │   │
-│  │  (all columns)  └────────────┬───────────────┘   │
-│  └──────┬──────────             │                    │
-│         │          ┌────────────▼───────────────┐   │
-│         │          │       Services              │   │
-│         │          │  SHA-256 │ Fuzzy │ SBERT   │   │
-│         │          │  Word2Vec│ DBSCAN│ HugFace │   │
-│         │          │  DDG Search │ License SPDX │   │
-│         │          └────────────┬───────────────┘   │
-└─────────┼──────────────────────-┼───────────────────┘
-          │                       │
-┌─────────▼───────────────────────▼───────────────────┐
-│              PostgreSQL (Supabase / pgvector)         │
-│                                                      │
-│  reference_batch     reference_text    reference_    │
-│  ─────────────────   ───────────────   embedding     │
-│  id (uuid)           id (uuid)         ──────────    │
-│  name                batch_id (fk)     ref_id (fk)   │
-│  created_at          raw_text          embedding      │
-│                      cleaned_text      (vector)       │
-│                      sha256                           │
-│                      source                           │
-│                      license                          │
-└──────────────────────────────────────────────────────┘
-```
-
----
-
-## 6. Data Flow
-
-### Registering a Reference Dataset
-```
-User uploads Excel/CSV file(s)
-        ↓
-read_all_text_from_file()
-  - Reads ALL text columns (skips pure-numeric columns)
-  - Handles CSV, XLSX, XLS, TXT
-  - Multiple files supported
-        ↓
-preprocess_text() per row
-  - Unicode NFKC normalization
-  - Lowercase
-  - Strip punctuation & symbols
-  - Remove stop words
-        ↓
-sha256_hash(cleaned_text) → stored as fingerprint
-        ↓
-SBERT encode_texts() → vector embeddings
-        ↓
-PostgreSQL: reference_batch + reference_text + reference_embedding
-```
-
-### Running Detection on New Text
-```
-User submits text(s) to a detection endpoint
-        ↓
-preprocess_text() — same normalization
-        ↓
-┌──────────────────────────────────────────────┐
-│              Detection Methods               │
-│                                              │
-│  Exact:    SHA-256 hash comparison           │
-│  Fuzzy:    Levenshtein + Jaccard + N-gram    │
-│  Semantic: SBERT cosine similarity           │
-│  AI:       roberta-large-openai-detector     │
-│  Web:      DuckDuckGo → fetch → score        │
-│  License:  SPDX + copyright header scan     │
-└──────────────────────────────────────────────┘
-        ↓
-risk_level: none / low / medium / high
-        ↓
-JSON response  OR  Excel / CSV / ZIP download
-```
-
----
-
-## 7. Detection Methods
-
-### 7.1 Exact Duplicate Detection
-- **Algorithm:** SHA-256 hashing of normalized text
-- **Speed:** O(1) per lookup (hash comparison)
-- **Use case:** Identical text, copy-paste duplicates
-- **Files:** `services/detect.py`
-
-### 7.2 Near-Duplicate (Fuzzy) Detection
-Four algorithms run in parallel, a match is flagged if **any** threshold is exceeded:
-
-| Algorithm | What it detects | Threshold |
-|---|---|---|
-| **Levenshtein** | Character-level edits (typos, spelling) | 0.85 |
-| **Jaccard** | Word-level overlap (paraphrasing) | 0.70 |
-| **N-gram** | Structural / substring similarity | 0.75 |
-| **Hamming** | Position-level differences (equal-length) | — |
-
-- **Files:** `services/fuzzy.py`
-
-### 7.3 Advanced Semantic Detection
-- **Model:** `all-MiniLM-L6-v2` (SentenceTransformers / SBERT)
-- **Algorithm:** Cosine similarity between sentence embeddings
-- **Use case:** Paraphrased content, contextually similar text with different wording
-- **Batch encoding:** All texts encoded in a single forward pass for efficiency
-- **Storage:** Vectors stored in PostgreSQL via pgvector extension
-- **Files:** `services/embeddings.py`
-
-### 7.4 AI-Generated Content Detection
-- **Model:** `openai-community/roberta-large-openai-detector` (HuggingFace Transformers)
-- **Labels:** `Real` (Human-written) / `Fake` (AI-generated)
-- **Confidence score:** 0.0 – 1.0 returned per text
-- **Batch support:** All texts processed concurrently via asyncio
-- **Model override:** Set `AI_DETECTION_MODEL` env var to swap model without code changes
-- **Files:** `services/ai_detection.py`
-
-### 7.5 Web Plagiarism Detection
-- **Search engine:** DuckDuckGo (no API key required)
-- **Approach:**
-  1. Extract key phrases from input text (longest sentences)
-  2. Search DuckDuckGo for each phrase
-  3. Fetch page content from result URLs (BeautifulSoup)
-  4. Sliding-window similarity scoring against page text
-  5. Web fingerprinting: content hash, domain, estimated publish date
-- **Scoring:** Levenshtein + Jaccard + N-gram on windowed page chunks
-- **Files:** `services/web_scan.py`, `services/web_fingerprint.py`
-
-### 7.6 License & Copyright Detection
-- **Detects:** SPDX license identifiers, copyright headers, Creative Commons notices
-- **Files:** `services/license_check.py`
-
-### 7.7 Cross-Batch Detection
-- Check new texts against **all stored reference batches** simultaneously
-- Returns which batch each match came from (`batch_id` + `batch_name`)
-- Supports exact, fuzzy, or semantic method
-- **Files:** `api/v1/detect.py` → `/detect/cross-batch`
-
-### 7.8 Clustering
-- **DBSCAN:** Density-based clustering — auto-detects number of clusters, labels outliers as noise
-- **K-Means:** Fixed number of clusters
-- Both use SBERT embeddings internally
-- **Files:** `services/clustering.py`
-
----
-
-## 8. API Reference
-
-Base URL: `http://localhost:8000`  
-Interactive docs: `http://localhost:8000/docs`
-
-### Ingest — `/api/v1/ingest`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/input/data` | Preview file contents — reads all rows & text columns, returns original + cleaned |
-| `POST` | `/preprocess` | Clean text from file(s) — view JSON or download CSV/Excel/ZIP |
-| `POST` | `/reference/register` | Store file(s) as reference batches in the database |
-
-**Multi-file support:** All three endpoints accept `files` as a list — upload multiple CSV/XLSX files in one request. In Swagger: click **"Add item"** under the `files` field for each additional file.
-
-**`/reference/register` options:**
-- `merge_files=false` (default): each file → its own named batch
-- `merge_files=true`: all files → one merged batch
-
----
-
-### Detection — `/api/v1/detect`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/exact` | Check single text for exact duplicate |
-| `POST` | `/fuzzy` | Check single text for near-duplicate |
-| `POST` | `/batch-fuzzy` | Find all fuzzy duplicate pairs in a submitted list |
-| `POST` | `/semantic` | Check single text for semantic duplicate |
-| `POST` | `/batch-semantic` | Find all semantic duplicate pairs in a submitted list |
-| `POST` | `/cross-batch` | Check texts against all stored batches (exact/fuzzy/semantic) |
-| `POST` | `/batch-word2vec` | Near-duplicate detection using Word2Vec/GloVe similarity |
-| `POST` | `/cluster` | Group texts into similarity clusters (DBSCAN or K-Means) |
-
-All detection endpoints accept `download_report=true` and `download_format=excel|csv|both` to stream a report file instead of returning JSON.
-
----
-
-### AI Detection — `/api/v1/ai-detect`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/check` | Detect AI content in a single text or uploaded file |
-| `POST` | `/batch-check` | Detect AI content in a list of texts or file |
-
----
-
-### Web Scan — `/api/v1/web-scan`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/scan` | Search the web for plagiarism matches for a single text |
-| `POST` | `/batch-scan` | Scan multiple texts concurrently |
-
----
-
-### License Check — `/api/v1/license-check`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/check` | Detect license identifiers and copyright notices in text |
-
----
-
-### Reports — `/api/v1/reports`
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/download` | Generate a styled Excel/CSV report from any detection results you pass in |
-| `POST` | `/from-web-scan` | Generate a report directly from a web scan JSON response — one row per matched source |
-
----
-
-## 9. Database Schema
-
-Hosted on **Supabase** with the **pgvector** extension enabled.
+## Database Schema
 
 ```sql
--- Stores named groups of reference texts (one per file upload or batch)
 CREATE TABLE reference_batch (
-    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name       TEXT,
-    created_at TIMESTAMPTZ DEFAULT now()
+        id uuid primary key default gen_random_uuid(),
+        name text,
+        created_at timestamptz default now()
 );
 
--- Stores each text entry with original, cleaned, and hashed forms
 CREATE TABLE reference_text (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    batch_id     UUID REFERENCES reference_batch(id) ON DELETE CASCADE,
-    raw_text     TEXT NOT NULL,
-    cleaned_text TEXT NOT NULL,
-    sha256       TEXT NOT NULL,
-    source       TEXT,
-    license      TEXT,
-    created_at   TIMESTAMPTZ DEFAULT now()
+        id uuid primary key default gen_random_uuid(),
+        batch_id uuid references reference_batch(id) on delete cascade,
+        raw_text text not null,
+        cleaned_text text not null,
+        sha256 text not null,
+        source text,
+        license text,
+        created_at timestamptz default now(),
+        source_file text,
+        row_number integer,
+        column_name text,
+        cell_ref text
 );
 
--- Stores SBERT vector embeddings for semantic search
 CREATE TABLE reference_embedding (
-    ref_id    UUID PRIMARY KEY REFERENCES reference_text(id) ON DELETE CASCADE,
-    embedding VECTOR(384)   -- dimension matches all-MiniLM-L6-v2
+        ref_id uuid primary key references reference_text(id) on delete cascade,
+        embedding vector(384)
+);
+
+CREATE TABLE pipeline_result (
+        id uuid primary key default gen_random_uuid(),
+        created_at timestamptz default now(),
+        status text not null default 'pending',
+        methods_used jsonb,
+        source_files text[],
+        total_entries integer default 0,
+        flagged_count integer default 0,
+        summary jsonb,
+        error_message text
+);
+
+CREATE TABLE duplicate_pair (
+        id uuid primary key default gen_random_uuid(),
+        pipeline_result_id uuid not null references pipeline_result(id) on delete cascade,
+        created_at timestamptz default now(),
+        original_file text not null,
+        original_row integer not null,
+        original_col text,
+        original_cell_ref text,
+        original_text text not null,
+        duplicate_file text not null,
+        duplicate_row integer not null,
+        duplicate_col text,
+        duplicate_cell_ref text,
+        duplicate_text text not null,
+        detection_type text not null,
+        method text not null,
+        similarity_pct float not null
+);
+
+CREATE TABLE web_ai_result (
+        id uuid primary key default gen_random_uuid(),
+        pipeline_result_id uuid not null references pipeline_result(id) on delete cascade,
+        created_at timestamptz default now(),
+        source_file text not null,
+        row_number integer not null,
+        column_name text,
+        cell_ref text,
+        original_text text not null,
+        is_plagiarised boolean default false,
+        source_url text,
+        ai_detected_pct float default 0.0
 );
 ```
 
----
+## Data Flow
 
-## 10. Configuration
+### Register Flow (Excel/CSV/TXT to reference_text)
+1. Upload file(s) to `POST /api/v1/ingest/reference/register`.
+2. `preprocessor.read_all_text_from_file()` reads the first sheet (Excel) or CSV/TXT and:
+   - Skips index-like columns (S.No, ID, etc.) and mostly numeric/empty columns.
+   - Emits one entry per non-empty cell with `source_file`, `row_number`, `column_name`, and `cell_ref`.
+3. Each entry is normalized via `preprocess_text()` and hashed (SHA-256).
+4. Rows are inserted into `reference_text` with full position metadata.
+5. Optional: SBERT embeddings are generated and stored in `reference_embedding`.
 
-Copy `.env.example` to `.env` in the `backend/` directory and fill in the values:
+### Pipeline Run Flow (files to results)
+1. Upload file(s) to `POST /api/v1/pipeline/run` and choose methods.
+2. Pipeline reads and normalizes entries with position metadata.
+3. Exact/fuzzy/semantic duplication is computed and stored as `duplicate_pair` rows.
+4. Web scan + AI detection output is stored in `web_ai_result` rows.
+5. `pipeline_result` tracks run metadata, counts, and status.
+
+## Detection Methods
+
+| Method | Algorithm | Thresholds | File |
+|---|---|---|---|
+| Exact Match | SHA-256 hash comparison | 100% identical | services/exact_match.py |
+| Fuzzy Match | Levenshtein, Jaccard, N-gram, Hamming | 0.85 / 0.70 / 0.75 / equal length | services/fuzzy_match.py |
+| Semantic Match | SBERT cosine similarity | 0.85 | services/semantic_match.py |
+| AI Detection | RoBERTa classifier | Returns confidence 0.0–100.0 | services/ai_detector.py |
+| Web Scanner | DuckDuckGo + BeautifulSoup + windowed similarity | 10s timeout, 3 retries | services/web_scanner.py |
+| License Detector | SPDX + copyright patterns | N/A | services/license_detector.py |
+| Pipeline Runner | Orchestrates selected methods | N/A | services/pipeline_runner.py |
+
+## API Reference
+
+Base URL: http://localhost:8000
+Docs: http://localhost:8000/docs
+
+### Ingest — /api/v1/ingest
+| Method | Path | Description |
+|---|---|---|
+| POST | /input/data | Preview file contents (original + cleaned) |
+| POST | /preprocess | Clean and preview text; optional CSV/Excel download |
+| POST | /reference/register | Register files as reference batches with cell positions |
+
+### Pipeline — /api/v1/pipeline
+| Method | Path | Description |
+|---|---|---|
+| POST | /run | Unified detection run across selected methods |
+
+### Batches — /api/v1/batches
+| Method | Path | Description |
+|---|---|---|
+| GET | / | List all batches with entry counts |
+| DELETE | /{batch_id} | Delete a batch and all related data |
+| PATCH | /{batch_id} | Rename a batch |
+
+### Reports — /api/v1/reports
+| Method | Path | Description |
+|---|---|---|
+| POST | /combined | Generate multi-sheet Excel report |
+
+## Pipeline Output Format
+
+### Duplicate Pair (exact/fuzzy/semantic)
+```json
+{
+        "original_file": "Dataset1.xlsx",
+        "original_row": 2,
+        "original_col": "Query",
+        "original_cell_ref": "B2",
+        "original_text": "...",
+        "duplicate_file": "Dataset1.xlsx",
+        "duplicate_row": 10,
+        "duplicate_col": "Query",
+        "duplicate_cell_ref": "B10",
+        "duplicate_text": "...",
+        "detection_type": "Exact",
+        "method": "exact",
+        "similarity_pct": 100.0
+}
+```
+
+### Web + AI Result
+```json
+{
+        "source_file": "Dataset1.xlsx",
+        "row_number": 2,
+        "column_name": "Query",
+        "cell_ref": "B2",
+        "original_text": "...",
+        "is_plagiarised": true,
+        "source_url": "https://...",
+        "ai_detected_pct": 0.0
+}
+```
+
+## Combined Report Format
+
+The combined Excel report includes three sheets:
+1. Row-to-Row Duplicates: Original, Duplicate, Type, Similarity (%).
+2. Cell-to-Cell Duplicates: Original, Duplicate, Type, Similarity (%).
+3. Web + AI Detection: Original, Plagiarised, Source, AI Detected (%).
+
+## Configuration
+
+Copy backend/.env.example to backend/.env and set:
 
 ```env
-# PostgreSQL connection string (Supabase or local Postgres with pgvector)
 DATABASE_URL=postgresql://user:password@host:port/dbname
-
-# Supabase project credentials
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-
-# SBERT model for semantic embeddings (HuggingFace model name or local path)
-# Default: all-MiniLM-L6-v2
 EMBEDDING_MODEL=all-MiniLM-L6-v2
-
-# HuggingFace model for AI-generated content detection
-# Default: openai-community/roberta-large-openai-detector
 AI_DETECTION_MODEL=openai-community/roberta-large-openai-detector
-
-# Detection thresholds (0.0 – 1.0)
 FUZZY_THRESHOLD=0.85
 SEMANTIC_THRESHOLD=0.85
-
-# Google Custom Search API (optional — for Google-based web scanning)
-GOOGLE_API_KEY=
-GOOGLE_CSE_ID=
+WEB_SCAN_TIMEOUT=10
+WEB_SCAN_RETRIES=3
+LOG_LEVEL=INFO
 ```
 
----
+## How to Run Locally
 
-## 11. How to Run Locally
-
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
-- A PostgreSQL database with the `pgvector` extension enabled
-  (easiest: free Supabase project at [supabase.com](https://supabase.com))
-
----
-
-### Backend Setup
-
+### Backend
 ```bash
-# 1. Navigate to backend
 cd backend
-
-# 2. Create and activate virtual environment
 python -m venv .venv
-
-# Windows
 .venv\Scripts\Activate.ps1
-
-# macOS/Linux
-source .venv/bin/activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
-
-# 4. Configure environment
 cp .env.example .env
-# Edit .env with your DATABASE_URL and other values
-
-# 5. Start the server
 uvicorn app.main:app --reload
 ```
 
-Backend will be available at:
-- **API:** `http://localhost:8000`
-- **Interactive Docs (Swagger):** `http://localhost:8000/docs`
-- **Alternative Docs (ReDoc):** `http://localhost:8000/redoc`
-
----
-
-### Frontend Setup
-
+### Frontend
 ```bash
-# 1. Navigate to frontend
 cd frontend
-
-# 2. Install dependencies
 npm install
-
-# 3. Start the dev server
 npm run dev
 ```
 
-Frontend will be available at: `http://localhost:3000`
-
----
-
-### Database Setup (Supabase)
-
-1. Create a free project at [supabase.com](https://supabase.com)
-2. Enable the `pgvector` extension:
-   ```sql
-   CREATE EXTENSION IF NOT EXISTS vector;
-   ```
-3. Run the three `CREATE TABLE` statements from [Section 9](#9-database-schema)
-4. Copy your connection string from **Project Settings → Database → Connection string (URI mode)** into `DATABASE_URL` in your `.env`
-
----
-
-### Verify Everything is Working
-
-```bash
-# Health check
-curl http://localhost:8000/
-
-# Expected response
-{"message": "Plagiarism Checker Backend Running"}
-
-# View all available endpoints
-open http://localhost:8000/docs
-```
-
----
+### Database (Supabase)
+1. Create a project at https://supabase.com.
+2. Enable pgvector: `CREATE EXTENSION IF NOT EXISTS vector;`
+3. Run the schema in the Database Schema section.
+4. Set `DATABASE_URL` in backend/.env.
 
 ## Key Design Decisions
 
 | Decision | Reason |
 |---|---|
-| **FastAPI over Flask/Django** | Native async support — critical for concurrent web scanning and batch ML inference |
-| **PostgreSQL + pgvector** | Unified storage for both structured data and vector embeddings — avoids a separate vector DB |
-| **SBERT `all-MiniLM-L6-v2`** | Best balance of speed and accuracy for short-text semantic similarity (optimised for sentences < 128 tokens) |
-| **`roberta-large-openai-detector`** | Same interface as base model but significantly higher accuracy; swappable via env var |
-| **DuckDuckGo (no API key)** | Zero-cost web scanning with no rate-limit registration; Google/Bing can be added when keys are available |
-| **Preprocessing shared utility** | Single `preprocess_text()` function used across all services ensures consistent normalization everywhere |
-| **Per-file batching** | Each uploaded file becomes a named batch — enables granular cross-file duplicate tracking |
+| FastAPI over Flask/Django | Async-first APIs for concurrent web scanning and batch inference |
+| PostgreSQL + pgvector | Single store for structured data and embeddings |
+| SBERT all-MiniLM-L6-v2 | Balanced performance for sentence-level similarity |
+| RoBERTa AI detector | High-accuracy AI detection with swap via env var |
+| DuckDuckGo web scan | No API key required; controlled retries and timeout |
+| Per-cell provenance | Enables exact row/column traceability in reports |
+| Startup model cache | Single-load model initialization via lifespan |
