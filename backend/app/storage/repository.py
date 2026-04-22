@@ -237,6 +237,43 @@ async def async_fetch_all_texts_with_batch_info() -> List[dict]:
         ]
 
 
+async def insert_reference_text_with_position(
+    pool,
+    batch_id,
+    raw_text,
+    cleaned_text,
+    sha256,
+    source_file,
+    row_number,
+    column_name,
+    cell_ref,
+    source=None,
+    license=None,
+) -> str:
+    """Insert a reference text row with position metadata and return its UUID."""
+    async with pool.acquire() as conn:
+        ref_id = await conn.fetchval(
+            ""
+            "insert into reference_text "
+            "(batch_id, raw_text, cleaned_text, sha256, source, license, "
+            " source_file, row_number, column_name, cell_ref) "
+            "values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
+            "returning id;"
+            "",
+            batch_id,
+            raw_text,
+            cleaned_text,
+            sha256,
+            source,
+            license,
+            source_file,
+            row_number,
+            column_name,
+            cell_ref,
+        )
+        return str(ref_id)
+
+
 # ── Async CRUD — embeddings ───────────────────────────────────────────────────
 
 async def async_insert_embeddings(pairs: Iterable[Tuple[str, Sequence[float]]]) -> None:

@@ -3,10 +3,12 @@
 Logic preserved — identical to services/preprocess.py.
 """
 
+import hashlib
 import io
+import os
 import re
 import unicodedata
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List
 
 import pandas as pd
 
@@ -51,53 +53,109 @@ def preprocess_texts(texts: Iterable[str]) -> List[str]:
 def read_all_text_from_file(
     filename: str,
     contents: bytes,
-) -> Tuple[List[str], List[str]]:
-    """Read every text value from ALL columns in a CSV, XLSX/XLS, or TXT file.
+) -> List[Dict[str, object]]:
+    """Read text values from CSV/XLSX/XLS/TXT with per-cell position metadata."""
 
-    Pure-numeric columns (e.g. prices, IDs) are automatically skipped.
-    Each non-null cell in a text column becomes one entry in the returned list.
+    def _column_letter(col_index: int) -> str:
+        letters = ""
+        index = col_index
+        while index >= 0:
+            index, remainder = divmod(index, 26)
+            letters = chr(65 + remainder) + letters
+            index -= 1
+        return letters
 
-    Args:
-        filename: Original file name (used to detect format).
-        contents: Raw file bytes.
+    def _sha256(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    Returns:
-        (rows, columns_read) where
-          rows         – flat list of non-null text values from all text columns
-          columns_read – names of the columns that were included
-    """
-    filename = filename.lower()
+    source_file = os.path.basename(filename)
+    filename_lower = filename.lower()
 
-    if filename.endswith(".txt"):
+    if filename_lower.endswith(".txt"):
         lines = contents.decode("utf-8", errors="replace").splitlines()
-        rows = [ln.strip() for ln in lines if ln.strip()]
-        return rows, ["text"]
+        entries: List[Dict[str, object]] = []
+        for idx, line in enumerate(lines, start=1):
+            raw_text = line.strip()
+            if not raw_text:
+                continue
+            cleaned_text = preprocess_text(raw_text)
+            entries.append(
+                {
+                    "text": raw_text,
+                    "cleaned_text": cleaned_text,
+                    "sha256": _sha256(cleaned_text),
+                    "source_file": source_file,
+                    "row_number": idx,
+                    "column_name": "text",
+                    "cell_ref": f"A{idx}",
+                }
+            )
+        return entries
 
-    if filename.endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(contents), dtype=str)
-    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-        df = pd.read_excel(io.BytesIO(contents), dtype=str)
+    if filename_lower.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(contents))
+    elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
+        df = pd.read_excel(io.BytesIO(contents), sheet_name=0)
     else:
         raise ValueError("Unsupported file format. Supported: CSV, XLSX, XLS, TXT")
 
-    text_columns: List[str] = []
-    rows: List[str] = []
+    skip_names = {
+        "s.no",
+        "s.no.",
+        "sno",
+        "sr",
+        "sr.no",
+        "serial",
+        "index",
+        "id",
+        "#",
+        "no.",
+    }
 
-    for col in df.columns:
-        col_values = df[col].dropna().astype(str)
-        if col_values.empty:
+    entries: List[Dict[str, object]] = []
+    total_rows = len(df.index)
+
+    for col_index, col in enumerate(df.columns):
+        col_name = str(col)
+        col_name_normalized = col_name.strip().lower().replace(" ", "")
+        if col_name_normalized in skip_names:
             continue
-        # Skip columns where every value is a bare number
-        numeric_mask = col_values.str.match(r"^-?\d+(\.\d+)?$")
-        if numeric_mask.all():
+
+        series = df[col]
+        if total_rows == 0:
             continue
-        text_columns.append(str(col))
-        rows.extend(col_values.tolist())
 
-    # Fallback: if every column looked numeric, include them all anyway
-    if not rows:
-        for col in df.columns:
-            rows.extend(df[col].dropna().astype(str).tolist())
-        text_columns = [str(c) for c in df.columns]
+        empty_mask = series.isna() | series.astype(str).str.strip().eq("")
+        numeric_mask = pd.to_numeric(series, errors="coerce").notna() & ~empty_mask
 
-    return rows, text_columns
+        if empty_mask.mean() > 0.8:
+            continue
+        if numeric_mask.mean() > 0.8:
+            continue
+
+        col_letter = _column_letter(col_index)
+
+        for row_index, value in enumerate(series.tolist(), start=1):
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                continue
+            raw_text = str(value).strip()
+            if not raw_text:
+                continue
+
+            cleaned_text = preprocess_text(raw_text)
+            row_number = row_index
+            cell_ref = f"{col_letter}{row_number + 1}"
+
+            entries.append(
+                {
+                    "text": raw_text,
+                    "cleaned_text": cleaned_text,
+                    "sha256": _sha256(cleaned_text),
+                    "source_file": source_file,
+                    "row_number": row_number,
+                    "column_name": col_name,
+                    "cell_ref": cell_ref,
+                }
+            )
+
+    return entries

@@ -21,7 +21,8 @@ from app.services.semantic_match import encode_texts
 from app.storage.repository import (
     async_create_batch,
     async_insert_embeddings,
-    async_insert_reference_texts,
+    insert_reference_text_with_position,
+    _get_pool,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,28 +216,65 @@ async def register_reference(
     sbert_model = getattr(request.app.state, "sbert_model", None)
 
     if texts and not files:
-        rows = [t.strip() for t in texts.split(",") if t.strip()]
-        return await _register_single_batch(rows, ["direct_input"], batch_name, build_embeddings, sbert_model)
+        text_entries = []
+        for idx, raw_text in enumerate([t.strip() for t in texts.split(",") if t.strip()], start=1):
+            cleaned_text = preprocess_texts([raw_text])[0]
+            text_entries.append(
+                {
+                    "text": raw_text,
+                    "cleaned_text": cleaned_text,
+                    "sha256": sha256_hash(cleaned_text),
+                    "source_file": "direct_input",
+                    "row_number": idx,
+                    "column_name": "text",
+                    "cell_ref": f"A{idx}",
+                }
+            )
+        batch = await _register_single_batch(
+            text_entries,
+            batch_name or "direct_input",
+            "direct_input",
+            build_embeddings,
+            sbert_model,
+        )
+        return {
+            "batches": [batch],
+            "total_entries": batch["entries_registered"],
+        }
 
     if merge_files:
-        all_rows, file_summary = await _collect_rows_from_uploads(files)
+        merged_entries = []
+        for upload in files:
+            contents = await upload.read()
+            try:
+                merged_entries.extend(
+                    read_all_text_from_file(upload.filename or "upload.txt", contents)
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error reading '{upload.filename}': {exc}",
+                ) from exc
+
         merged_name = batch_name or "merged_batch"
-        result = await _register_single_batch(
-            all_rows,
-            [f["filename"] for f in file_summary],
+        batch = await _register_single_batch(
+            merged_entries,
+            merged_name,
             merged_name,
             build_embeddings,
             sbert_model,
         )
-        result["files"] = file_summary
-        result["merge_mode"] = True
-        return result
+        return {
+            "batches": [batch],
+            "total_entries": batch["entries_registered"],
+        }
 
     batches = []
+    total_entries = 0
     for i, upload in enumerate(files):
         contents = await upload.read()
         try:
-            rows, columns = read_all_text_from_file(upload.filename or "upload.txt", contents)
+            entries = read_all_text_from_file(upload.filename or "upload.txt", contents)
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
@@ -247,26 +285,57 @@ async def register_reference(
             f"{batch_name}-{i + 1}" if batch_name and len(files) > 1
             else batch_name or upload.filename
         )
-        result = await _register_single_batch(rows, columns, name, build_embeddings, sbert_model)
-        batches.append(result)
+        batch = await _register_single_batch(
+            entries,
+            name,
+            upload.filename or name,
+            build_embeddings,
+            sbert_model,
+        )
+        total_entries += batch["entries_registered"]
+        batches.append(batch)
 
-    return {"status": "All batches registered", "total_files": len(files), "merge_mode": False, "batches": batches}
+    return {"batches": batches, "total_entries": total_entries}
 
 
 async def _register_single_batch(
-    rows: List[str],
-    columns: List[str],
+    entries: List[dict],
     batch_name: Optional[str],
+    file_label: Optional[str],
     build_embeddings: bool,
     sbert_model,
 ) -> dict:
     """Insert one batch of rows into the database and optionally build embeddings."""
-    cleaned_rows = preprocess_texts(rows)
-    hashes = [sha256_hash(r) for r in cleaned_rows]
-
     batch_id = await async_create_batch(batch_name)
-    items = zip(rows, cleaned_rows, hashes, [None] * len(rows), [None] * len(rows))
-    ref_ids = await async_insert_reference_texts(batch_id, items)
+    pool = await _get_pool()
+
+    ref_ids: List[str] = []
+    cleaned_rows: List[str] = []
+
+    for entry in entries:
+        raw_text = entry.get("text", "")
+        cleaned_text = entry.get("cleaned_text", "")
+        sha256 = entry.get("sha256") or sha256_hash(cleaned_text)
+        source_file = entry.get("source_file")
+        row_number = entry.get("row_number")
+        column_name = entry.get("column_name")
+        cell_ref = entry.get("cell_ref")
+
+        ref_id = await insert_reference_text_with_position(
+            pool,
+            batch_id,
+            raw_text,
+            cleaned_text,
+            sha256,
+            source_file,
+            row_number,
+            column_name,
+            cell_ref,
+            None,
+            None,
+        )
+        ref_ids.append(ref_id)
+        cleaned_rows.append(cleaned_text)
 
     embeddings_built = False
     if build_embeddings and sbert_model is not None:
@@ -276,10 +345,8 @@ async def _register_single_batch(
         embeddings_built = True
 
     return {
-        "status": "Reference batch registered",
         "batch_id": batch_id,
         "batch_name": batch_name,
-        "columns_read": columns,
-        "total_rows": len(rows),
-        "embeddings_built": embeddings_built,
+        "file": file_label,
+        "entries_registered": len(entries),
     }
