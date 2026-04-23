@@ -80,6 +80,17 @@ const DETECTION_MODES = [
     color: "#EF4444",
     route: "/analyze/license",
   },
+  {
+    id: "folder",
+    icon: "📁",
+    title: "Full Folder / Archive Scan",
+    subtitle: "Unified Pipeline Detection",
+    description:
+      "Upload entire folders or .zip archives to automatically extract valid files and run all detection methods out of the box.",
+    tags: ["Folder", "ZIP", "Pipeline"],
+    color: "#14B8A6",
+    route: "/analyze/folder",
+  },
 ];
 
 export default function DetectionSelector() {
