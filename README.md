@@ -57,7 +57,7 @@ This tool detects all of the above, produces structured reports, and ensures dat
 | scikit-learn | Used internally by some detection services |
 
 ### Frontend
-| Library | Purpose |
+| Library | Purpose |  
 |---|---|
 | Next.js 14 (App Router) | React framework |
 | TypeScript | Type-safe frontend code |

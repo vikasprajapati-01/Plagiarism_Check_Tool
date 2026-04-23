@@ -3,7 +3,7 @@
 import io
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.services.cross_compare import (
@@ -12,10 +12,10 @@ from app.services.cross_compare import (
     generate_colored_workbook,
 )
 
-app = FastAPI(title="Compare API")
+router = APIRouter()
 
 
-@app.post("/compare/cross")
+@router.post("/cross")
 async def cross_compare(
     files: List[UploadFile] = File(...),
     threshold: float = Form(75.0),
@@ -88,7 +88,7 @@ async def cross_compare(
     }
 
 
-@app.post("/compare/cross/report")
+@router.post("/report")
 async def cross_compare_report(
     files: List[UploadFile] = File(...),
     threshold: float = Form(75.0),
@@ -126,7 +126,7 @@ async def cross_compare_report(
     )
 
 
-@app.post("/compare/cross/colored")
+@router.post("/colored")
 async def cross_compare_colored(
     file: UploadFile = File(...),
     threshold: float = Form(75.0),

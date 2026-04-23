@@ -34,8 +34,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from app.services.preprocess import preprocess_text
-from app.services.fuzzy import levenshtein_similarity
+from app.services.preprocessor import preprocess_text
+from app.services.fuzzy_match import levenshtein_similarity
 
 
 # ==============================================================================
