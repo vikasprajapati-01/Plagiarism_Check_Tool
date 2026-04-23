@@ -2,7 +2,7 @@
 
 **Samsung PRISM Research Project**
 
-This project provides a unified plagiarism and duplicate detection pipeline for Excel/CSV/TXT datasets. It ingests files, normalizes content, stores per-cell provenance in PostgreSQL (Supabase + pgvector), and runs exact, fuzzy, semantic, AI detection, web scanning, and license checks to generate structured results and multi-sheet reports.
+This project provides a unified plagiarism and duplicate detection pipeline for Excel/CSV/TXT datasets (plus ZIP bundles of those files)
 
 ## Table of Contents
 
@@ -95,7 +95,7 @@ backend/
     │       └── compare.py             # cross-file row/cell comparison
     ├── services/
     │   ├── __init__.py
-    │   ├── preprocessor.py            # reads Excel/CSV/TXT with cell positions
+        │   ├── preprocessor.py            # reads Excel/CSV/TXT (+ ZIP bundles) with cell positions
     │   ├── exact_match.py             # SHA-256 exact duplicate detection
     │   ├── fuzzy_match.py             # Levenshtein, Jaccard, N-gram
     │   ├── semantic_match.py          # SBERT cosine similarity
@@ -223,9 +223,9 @@ CREATE TABLE web_ai_result (
 
 ## Data Flow
 
-### Register Flow (Excel/CSV/TXT to reference_text)
-1. Upload file(s) to `POST /api/v1/ingest/reference/register`.
-2. `preprocessor.read_all_text_from_file()` reads the first sheet (Excel) or CSV/TXT and:
+### Register Flow (Excel/CSV/TXT/ZIP to reference_text)
+1. Upload file(s) to `POST /api/v1/ingest/reference/register` (ZIP can contain CSV/XLSX/XLS/TXT files).
+2. `preprocessor.read_all_text_from_file()` reads the first sheet (Excel) or CSV/TXT, and for ZIP files it recursively parses supported files inside the archive:
    - Skips index-like columns (S.No, ID, etc.) and mostly numeric/empty columns.
    - Emits one entry per non-empty cell with `source_file`, `row_number`, `column_name`, and `cell_ref`.
 3. Each entry is normalized via `preprocess_text()` and hashed (SHA-256).
@@ -233,7 +233,7 @@ CREATE TABLE web_ai_result (
 5. Optional: SBERT embeddings are generated and stored in `reference_embedding`.
 
 ### Pipeline Run Flow (files to results)
-1. Upload file(s) to `POST /api/v1/pipeline/run` and choose methods.
+1. Upload file(s) to `POST /api/v1/pipeline/run` and choose methods (ZIP bundles supported).
 2. Pipeline reads and normalizes entries.
 3. Exact/fuzzy/semantic/AI/web/license methods run in-memory against reference texts.
 4. API returns a `PipelineResult` JSON payload (no pipeline results are stored in the database).
@@ -264,14 +264,14 @@ Docs: http://localhost:8000/docs
 ### Ingest — /api/v1/ingest
 | Method | Path | Description |
 |---|---|---|
-| POST | /input/data | Preview file contents (original + cleaned) |
-| POST | /preprocess | Clean and preview text; optional CSV/Excel download |
-| POST | /reference/register | Register files as reference batches with cell positions |
+| POST | /input/data | Preview file contents (original + cleaned); CSV/XLSX/XLS/TXT/ZIP |
+| POST | /preprocess | Clean and preview text; optional CSV/Excel download; CSV/XLSX/XLS/TXT/ZIP |
+| POST | /reference/register | Register files as reference batches with cell positions; CSV/XLSX/XLS/TXT/ZIP |
 
 ### Pipeline — /api/v1/pipeline
 | Method | Path | Description |
 |---|---|---|
-| POST | /run | Unified detection run across selected methods |
+| POST | /run | Unified detection run across selected methods; CSV/XLSX/XLS/TXT/ZIP |
 | POST | /run-on-server | Run pipeline on stored batches only |
 
 ### Batches — /api/v1/batches
