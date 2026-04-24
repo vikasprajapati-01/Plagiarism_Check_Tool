@@ -297,6 +297,7 @@ async def scan_text_online(
 
     seen_urls: set = set()
     search_results: list = []
+    max_total_results = 10
 
     for query in queries:
         try:
@@ -307,10 +308,14 @@ async def scan_text_online(
         except RuntimeError as exc:
             return WebScanResult(submitted_text=text, error=str(exc))
         for r in raw:
+            if len(search_results) >= max_total_results:
+                break
             url = r.get("href", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 search_results.append(r)
+        if len(search_results) >= max_total_results:
+            break
 
     total_checked = len(search_results)
 

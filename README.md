@@ -234,9 +234,10 @@ CREATE TABLE web_ai_result (
 
 ### Pipeline Run Flow (files to results)
 1. Upload file(s) to `POST /api/v1/pipeline/run` and choose methods (ZIP bundles supported).
-2. Pipeline reads and normalizes entries.
-3. Exact/fuzzy/semantic/AI/web/license methods run in-memory against reference texts.
-4. API returns a `PipelineResult` JSON payload (no pipeline results are stored in the database).
+2. Optional: set `comparison_scope` to `files`, `database`, or `both` (default `both`).
+3. Pipeline reads and normalizes entries.
+4. Exact/fuzzy/semantic/AI/web/license methods run in-memory against reference texts.
+5. API returns a `PipelineRunResult` JSON payload (no pipeline results are stored in the database).
 
 ### Server-side Pipeline Flow (registered batches only)
 1. Call `POST /api/v1/pipeline/run-on-server` with batch IDs and selected methods.
@@ -271,7 +272,7 @@ Docs: http://localhost:8000/docs
 ### Pipeline — /api/v1/pipeline
 | Method | Path | Description |
 |---|---|---|
-| POST | /run | Unified detection run across selected methods; CSV/XLSX/XLS/TXT/ZIP |
+| POST | /run | Unified detection run across selected methods; supports `comparison_scope`, min-word thresholds, and optional Excel download |
 | POST | /run-on-server | Run pipeline on stored batches only |
 
 ### Batches — /api/v1/batches
@@ -323,16 +324,43 @@ Docs: http://localhost:8000/docs
 }
 ```
 
+### PipelineRunResult (top-level)
+```json
+{
+        "pipeline_id": "a1b2c3d4-...",
+        "status": "completed",
+        "comparison_scope": "both",
+        "summary": {
+                "total_files": 2,
+                "total_row_duplicates": 3,
+                "total_cell_duplicates": 1
+        },
+        "row_duplicates": [
+                {
+                        "original": "file1.xlsx-Row 10",
+                        "duplicate": "file2.xlsx-Row 10",
+                        "type": "Near",
+                        "similarity_pct": 84.0
+                }
+        ],
+        "cell_duplicates": [],
+        "web_ai_results": [
+                {
+                        "original": "file1.xlsx-A10",
+                        "plagiarised": "No",
+                        "source": "N/A",
+                        "ai_detected_pct": 12.0
+                }
+        ]
+}
+```
+
 ## Combined Report Format
 
-The combined Excel report includes seven sheets:
-1. Summary
-2. Exact Matches
-3. Fuzzy Matches
-4. Semantic Matches
-5. AI Detection
-6. Web Scan
-7. License Check
+The combined Excel report includes three sheets:
+1. Row-to-Row
+2. Cell-to-Cell
+3. AI-Plagiarism
 
 ## Configuration
 
@@ -349,6 +377,9 @@ FUZZY_THRESHOLD=0.85
 SEMANTIC_THRESHOLD=0.85
 WEB_SCAN_TIMEOUT=10
 WEB_SCAN_RETRIES=3
+MIN_WORDS_FOR_AI=10
+MIN_WORDS_FOR_WEB=10
+MIN_WORDS_FOR_CELL_EXACT=3
 LOG_LEVEL=INFO
 ```
 

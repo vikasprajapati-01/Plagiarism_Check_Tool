@@ -4,17 +4,18 @@ POST /run            — accepts uploaded files, runs the full detection pipelin
 POST /run-on-server  — runs the pipeline on already-registered server-side batches.
 """
 
+import io
 import json
 import logging
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
-from app.core.models import MethodsConfig, PipelineResult, ServerPipelineRequest
+from app.core.models import MethodsConfig, PipelineResult, PipelineRunResult, ServerPipelineRequest
 from app.core.config import settings
-from app.services.pipeline_runner import run_pipeline
-from app.services.preprocessor import read_all_text_from_file
-from app.storage.repository import async_fetch_all_texts_by_batch
+from app.services.pipeline_runner import run_full_pipeline, run_pipeline
+from app.storage.repository import async_fetch_all_texts_by_batch, async_fetch_all_texts_with_batch_info
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,7 +33,7 @@ def _get_models(request: Request):
     return sbert, ai
 
 
-@router.post("/run", response_model=PipelineResult)
+@router.post("/run")
 async def run_pipeline_endpoint(
     request: Request,
     files: Annotated[
@@ -41,8 +42,13 @@ async def run_pipeline_endpoint(
     ] = [],
     reference_batch_ids: Optional[str] = Form(None),  # JSON array string
     methods: Optional[str] = Form(None),               # JSON object string
+    comparison_scope: str = Form("both"),
+    min_words_for_ai: int = Form(10),
+    min_words_for_web: int = Form(10),
+    min_words_for_cell_exact: int = Form(3),
     download_report: bool = Form(False),
     report_format: str = Form("excel"),
+    color_report: bool = Form(False),
 ):
     """Run the full detection pipeline on uploaded files.
 
@@ -68,26 +74,24 @@ async def run_pipeline_endpoint(
     else:
         methods_config = MethodsConfig()
 
+    # ── Validate comparison scope ──────────────────────────────────────────
+    allowed_scopes = {"files", "database", "both"}
+    if comparison_scope not in allowed_scopes:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid 'comparison_scope'. Must be one of: files, database, both.",
+        )
+
     # ── Read input texts from uploaded files ──────────────────────────────────
     if not files:
         raise HTTPException(
             status_code=400, detail="Provide at least one file."
         )
 
-    input_texts: List[str] = []
+    parsed_files: List[tuple[str, bytes]] = []
     for upload in files:
         contents = await upload.read()
-        try:
-            rows, _ = read_all_text_from_file(upload.filename or "upload.txt", contents)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error reading '{upload.filename}': {exc}",
-            ) from exc
-        input_texts.extend(rows)
-
-    if not input_texts:
-        raise HTTPException(status_code=400, detail="No text found in the uploaded files.")
+        parsed_files.append((upload.filename or "upload.txt", contents))
 
     # ── Load reference texts ──────────────────────────────────────────────────
     batch_ids: List[str] = []
@@ -100,30 +104,54 @@ async def run_pipeline_endpoint(
                 detail=f"Invalid 'reference_batch_ids' JSON: {exc}",
             ) from exc
 
-    reference_texts: List[str] = []
-    if batch_ids:
-        for bid in batch_ids:
-            texts = await async_fetch_all_texts_by_batch(bid)
-            reference_texts.extend(texts)
-    else:
-        reference_texts = await async_fetch_all_texts_by_batch()
+    reference_texts_with_info: List[dict] = []
+    if comparison_scope in {"database", "both"}:
+        reference_texts_with_info = await async_fetch_all_texts_with_batch_info()
+        if batch_ids:
+            reference_texts_with_info = [
+                ref for ref in reference_texts_with_info if ref.get("batch_id") in batch_ids
+            ]
 
     logger.info(
-        "Pipeline run: %d input texts, %d reference texts, methods=%s",
-        len(input_texts), len(reference_texts), methods_config.model_dump(),
+        "Pipeline run: %d files, %d reference entries, scope=%s, methods=%s",
+        len(parsed_files), len(reference_texts_with_info), comparison_scope, methods_config.model_dump(),
     )
 
-    return await run_pipeline(
-        texts=input_texts,
+    result = await run_full_pipeline(
+        files=parsed_files,
+        comparison_scope=comparison_scope,
+        reference_texts_with_info=reference_texts_with_info,
         methods_config=methods_config,
-        reference_texts=reference_texts,
         sbert_model=sbert_model,
         ai_model=ai_model,
+        threshold=75.0,
         fuzzy_threshold=settings.FUZZY_THRESHOLD,
         semantic_threshold=settings.SEMANTIC_THRESHOLD,
         web_scan_timeout=settings.WEB_SCAN_TIMEOUT,
         web_scan_retries=settings.WEB_SCAN_RETRIES,
+        min_words_for_ai=min_words_for_ai,
+        min_words_for_web=min_words_for_web,
+        min_words_for_cell_exact=min_words_for_cell_exact,
     )
+
+    if download_report:
+        from app.api.v1.reports import generate_pipeline_report
+
+        report_bytes = generate_pipeline_report(
+            pipeline_id=result.pipeline_id,
+            row_duplicates=[r.dict() for r in result.row_duplicates],
+            cell_duplicates=[r.dict() for r in result.cell_duplicates],
+            web_ai_results=[r.dict() for r in result.web_ai_results],
+            color_report=color_report,
+        )
+        filename = f"pipeline_{result.pipeline_id[:8]}_report.xlsx"
+        return StreamingResponse(
+            io.BytesIO(report_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+    return result
 
 
 @router.post("/run-on-server", response_model=PipelineResult)

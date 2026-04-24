@@ -10,10 +10,11 @@ Overall risk per entry = highest risk across all enabled methods.
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.models import (
     AIDetectionResult,
+    DuplicatePairResult,
     EntryMethodResults,
     EntryResult,
     ExactMatchResult,
@@ -21,17 +22,20 @@ from app.core.models import (
     LicenseDetectionResult,
     MethodsConfig,
     PipelineResult,
+    PipelineRunResult,
     PipelineSummary,
     RiskBreakdown,
     SemanticMatchResult,
+    WebAiEntryResult,
     WebScanMatchItem,
     WebScanResult,
 )
 from app.services.ai_detector import detect_ai_content
+from app.services.cross_compare import run_cross_comparison
 from app.services.exact_match import sha256_hash
 from app.services.fuzzy_match import is_fuzzy_duplicate
 from app.services.license_detector import detect_license
-from app.services.preprocessor import preprocess_text
+from app.services.preprocessor import preprocess_text, read_all_text_from_file
 from app.services.semantic_match import encode_texts, cosine_similarity
 from app.services.web_scanner import scan_text_online
 
@@ -332,4 +336,275 @@ async def run_pipeline(
             risk_breakdown=breakdown,
         ),
         results=entry_results,
+    )
+
+
+async def run_full_pipeline(
+    files: List[Tuple[str, bytes]],
+    comparison_scope: str,
+    reference_texts_with_info: List[dict],
+    methods_config: MethodsConfig,
+    sbert_model: Any,
+    ai_model: Any,
+    threshold: float = 75.0,
+    fuzzy_threshold: float = 0.85,
+    semantic_threshold: float = 0.85,
+    web_scan_timeout: int = 10,
+    web_scan_retries: int = 3,
+    min_words_for_ai: int = 10,
+    min_words_for_web: int = 10,
+    min_words_for_cell_exact: int = 3,
+) -> PipelineRunResult:
+    pipeline_id = str(uuid.uuid4())
+    row_duplicates: List[DuplicatePairResult] = []
+    cell_duplicates: List[DuplicatePairResult] = []
+    web_ai_results: List[WebAiEntryResult] = []
+
+    def _clamp_pct(value: float) -> float:
+        return max(0.0, min(100.0, value))
+
+    entries_by_file: Dict[str, List[Dict[str, object]]] = {}
+    all_entries: List[Dict[str, object]] = []
+
+    for filename, contents in files:
+        try:
+            entries = read_all_text_from_file(filename, contents)
+            entries_by_file[filename] = entries
+            all_entries.extend(entries)
+        except Exception as exc:
+            logger.warning("Failed to read file %s: %s", filename, exc)
+            entries_by_file[filename] = []
+
+    if comparison_scope in {"files", "both"}:
+        try:
+            loop = asyncio.get_event_loop()
+            from functools import partial
+
+            row_matches, cell_matches = await loop.run_in_executor(
+                None,
+                partial(
+                    run_cross_comparison,
+                    files,
+                    threshold,
+                    do_row_compare=methods_config.exact or methods_config.fuzzy,
+                    do_cell_compare=methods_config.exact or methods_config.fuzzy,
+                ),
+            )
+
+            filtered_cell_matches = []
+            for match in cell_matches:
+                original_words = len(str(match.original_text).split())
+                duplicate_words = len(str(match.duplicate_text).split())
+                if original_words >= min_words_for_cell_exact and duplicate_words >= min_words_for_cell_exact:
+                    filtered_cell_matches.append(match)
+            cell_matches = filtered_cell_matches
+
+            row_duplicates = [
+                DuplicatePairResult(
+                    original=f"{m.original_label}",
+                    duplicate=f"{m.duplicate_label}",
+                    type=m.match_type,
+                    similarity_pct=_clamp_pct(m.similarity),
+                )
+                for m in row_matches
+            ]
+            cell_duplicates = [
+                DuplicatePairResult(
+                    original=f"{m.original_label}",
+                    duplicate=f"{m.duplicate_label}",
+                    type=m.match_type,
+                    similarity_pct=_clamp_pct(m.similarity),
+                )
+                for m in cell_matches
+            ]
+        except Exception as exc:
+            logger.warning("Cross comparison failed: %s", exc)
+
+    if comparison_scope in {"database", "both"} and reference_texts_with_info:
+        db_duplicate_pairs: List[DuplicatePairResult] = []
+        ref_cleaned: List[str] = []
+        ref_by_cleaned: Dict[str, dict] = {}
+        ref_hashes: Dict[str, List[dict]] = {}
+
+        for ref in reference_texts_with_info:
+            cleaned = ref.get("cleaned_text") or preprocess_text(ref.get("raw_text", ""))
+            ref["cleaned_text"] = cleaned
+            ref_cleaned.append(cleaned)
+            if cleaned not in ref_by_cleaned:
+                ref_by_cleaned[cleaned] = ref
+            ref_hash = sha256_hash(cleaned)
+            ref_hashes.setdefault(ref_hash, []).append(ref)
+
+        entry_vecs: List[List[float]] = []
+        ref_vecs: List[List[float]] = []
+
+        if methods_config.semantic and sbert_model is not None and all_entries and ref_cleaned:
+            try:
+                loop = asyncio.get_event_loop()
+                from functools import partial
+
+                all_texts = [e.get("cleaned_text", "") for e in all_entries] + ref_cleaned
+                all_vecs = await loop.run_in_executor(
+                    None, partial(encode_texts, all_texts, sbert_model, False)
+                )
+                entry_vecs = all_vecs[: len(all_entries)]
+                ref_vecs = all_vecs[len(all_entries):]
+            except Exception as exc:
+                logger.warning("Semantic encoding failed: %s", exc)
+
+        for entry_idx, entry in enumerate(all_entries):
+            entry_cleaned = entry.get("cleaned_text", "")
+            original_label = f"{entry.get('source_file')}-Row {entry.get('row_number')}"
+
+            if methods_config.exact:
+                try:
+                    entry_hash = entry.get("sha256") or sha256_hash(entry_cleaned)
+                    for ref in ref_hashes.get(entry_hash, []):
+                        similarity_pct = 100.0
+                        db_duplicate_pairs.append(
+                            DuplicatePairResult(
+                                original=original_label,
+                                duplicate=f"{ref.get('batch_name')}-DB entry",
+                                type="Exact",
+                                similarity_pct=similarity_pct,
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning("Exact DB compare failed: %s", exc)
+
+            if methods_config.fuzzy and ref_cleaned:
+                try:
+                    is_dup, matched, scores = await is_fuzzy_duplicate(
+                        entry_cleaned, ref_cleaned, fuzzy_threshold
+                    )
+                    if is_dup:
+                        best_score = max(scores.values()) if scores else 0.0
+                        similarity_pct = _clamp_pct(best_score * 100)
+                        ref = ref_by_cleaned.get(matched or "")
+                        db_duplicate_pairs.append(
+                            DuplicatePairResult(
+                                original=original_label,
+                                duplicate=f"{(ref.get('batch_name') if ref else 'Unknown')}-DB entry",
+                                type="Exact" if similarity_pct == 100.0 else "Near",
+                                similarity_pct=similarity_pct,
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning("Fuzzy DB compare failed: %s", exc)
+
+            if methods_config.semantic and entry_vecs and ref_vecs:
+                try:
+                    query_vec = entry_vecs[entry_idx]
+                    best_score = -1.0
+                    best_idx = -1
+                    for ref_idx, ref_vec in enumerate(ref_vecs):
+                        score = cosine_similarity(query_vec, ref_vec)
+                        if score > best_score:
+                            best_score = score
+                            best_idx = ref_idx
+
+                    if best_score >= semantic_threshold and best_idx >= 0:
+                        similarity_pct = _clamp_pct(best_score * 100)
+                        ref = reference_texts_with_info[best_idx]
+                        db_duplicate_pairs.append(
+                            DuplicatePairResult(
+                                original=original_label,
+                                duplicate=f"{ref.get('batch_name')}-DB entry",
+                                type="Exact" if similarity_pct == 100.0 else "Near",
+                                similarity_pct=similarity_pct,
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning("Semantic DB compare failed: %s", exc)
+
+        deduped: Dict[tuple, DuplicatePairResult] = {}
+        for pair in db_duplicate_pairs:
+            key = (pair.original, pair.duplicate)
+            if key not in deduped or pair.similarity_pct > deduped[key].similarity_pct:
+                deduped[key] = pair
+        row_duplicates.extend(list(deduped.values()))
+
+    if methods_config.web_scan or methods_config.ai_detection or methods_config.license_check:
+        for entries in entries_by_file.values():
+            for entry in entries:
+                raw_text = entry.get("text", "")
+                word_count = len(str(raw_text).split())
+                run_ai = methods_config.ai_detection and ai_model is not None and word_count >= min_words_for_ai
+                run_web = methods_config.web_scan and word_count >= min_words_for_web
+                run_license = methods_config.license_check and word_count >= min_words_for_ai
+
+                if not (run_ai or run_web or run_license):
+                    continue
+
+                tasks: Dict[str, Any] = {}
+                if run_web:
+                    tasks["web_scan"] = scan_text_online(
+                        raw_text,
+                        timeout=web_scan_timeout,
+                        retries=web_scan_retries,
+                    )
+                if run_ai:
+                    tasks["ai_detection"] = detect_ai_content(raw_text, ai_model)
+                if run_license:
+                    tasks["license_check"] = detect_license(raw_text)
+
+                results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+                method_results: Dict[str, Any] = {}
+                for key, result in zip(tasks.keys(), results):
+                    if isinstance(result, Exception):
+                        logger.warning("Method %s failed for web/ai scan: %s", key, result)
+                    else:
+                        method_results[key] = result
+
+                web_result = method_results.get("web_scan")
+                ai_result = method_results.get("ai_detection")
+
+                is_plagiarised = False
+                source_url: Optional[str] = None
+                if web_result is not None:
+                    is_plagiarised = getattr(web_result, "is_plagiarism", False)
+                    matches = getattr(web_result, "matches", []) or []
+                    if matches:
+                        source_url = getattr(matches[0], "url", None)
+
+                ai_pct = 0.0
+                if ai_result is not None:
+                    label = ai_result.get("label")
+                    confidence = float(ai_result.get("confidence", 0.0))
+                    if label == "AI":
+                        ai_pct = _clamp_pct(round(confidence * 100, 1))
+
+                source_str = source_url if source_url else "N/A"
+                plagiarised_str = "Yes" if is_plagiarised else "No"
+
+                if run_web or run_ai:
+                    web_ai_results.append(
+                        WebAiEntryResult(
+                            original=f"{entry.get('source_file')}-{entry.get('cell_ref')}",
+                            plagiarised=plagiarised_str,
+                            source=source_str,
+                            ai_detected_pct=ai_pct,
+                        )
+                    )
+
+    summary = {
+        "total_files": len(files),
+        "total_row_duplicates": len(row_duplicates),
+        "total_cell_duplicates": len(cell_duplicates),
+        "exact_row_matches": sum(1 for r in row_duplicates if r.type == "Exact"),
+        "near_row_matches": sum(1 for r in row_duplicates if r.type == "Near"),
+        "exact_cell_matches": sum(1 for r in cell_duplicates if r.type == "Exact"),
+        "near_cell_matches": sum(1 for r in cell_duplicates if r.type == "Near"),
+        "plagiarised_entries": sum(1 for r in web_ai_results if r.plagiarised == "Yes"),
+        "ai_detected_entries": sum(1 for r in web_ai_results if r.ai_detected_pct > 50.0),
+    }
+
+    return PipelineRunResult(
+        pipeline_id=pipeline_id,
+        status="completed",
+        comparison_scope=comparison_scope,
+        summary=summary,
+        row_duplicates=row_duplicates,
+        cell_duplicates=cell_duplicates,
+        web_ai_results=web_ai_results,
     )

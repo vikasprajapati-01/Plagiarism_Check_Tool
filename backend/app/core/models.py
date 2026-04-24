@@ -7,6 +7,7 @@ subclasses in the router files.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -161,3 +162,35 @@ class ServerPipelineRequest(BaseModel):
 
     batch_ids: List[str]
     methods: MethodsConfig = Field(default_factory=MethodsConfig)
+
+
+# ── Full pipeline (file + db) result ─────────────────────────────────────────
+
+class ComparisonScope(str, Enum):
+    files = "files"
+    database = "database"
+    both = "both"
+
+
+class DuplicatePairResult(BaseModel):
+    original: str
+    duplicate: str
+    type: str
+    similarity_pct: float
+
+
+class WebAiEntryResult(BaseModel):
+    original: str
+    plagiarised: str
+    source: str
+    ai_detected_pct: float
+
+
+class PipelineRunResult(BaseModel):
+    pipeline_id: str
+    status: str
+    comparison_scope: str
+    summary: dict
+    row_duplicates: List[DuplicatePairResult]
+    cell_duplicates: List[DuplicatePairResult]
+    web_ai_results: List[WebAiEntryResult]
