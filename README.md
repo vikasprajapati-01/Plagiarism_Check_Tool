@@ -73,6 +73,8 @@ backend/
 ├── requirements.txt
 ├── scripts/
 │   └── check_db.py                    # DB connectivity check
+│   └── compare_server.py               # minimal compare-only FastAPI server
+│   └── demo_query_column.py            # sample workbook + Query-column demo
 ├── tests/
 │   └── test_cross_compare.py          # cross-compare tests
 └── app/
@@ -290,7 +292,7 @@ Docs: http://localhost:8000/docs
 ### Compare — /api/v1/compare
 | Method | Path | Description |
 |---|---|---|
-| POST | /cross | Cross-file row/cell comparison (JSON result) |
+| POST | /cross | Cross-file row/cell comparison (JSON result, supports Query-column targeting) |
 | POST | /report | Cross-file comparison report (.xlsx) |
 | POST | /colored | Color-coded workbook (.xlsx) |
 
