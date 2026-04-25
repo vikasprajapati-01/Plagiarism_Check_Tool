@@ -71,29 +71,6 @@ def read_all_text_from_file(
     source_file = os.path.basename(filename)
     filename_lower = filename.lower()
 
-    if filename_lower.endswith(".zip"):
-        import zipfile
-        entries = []
-        try:
-            with zipfile.ZipFile(io.BytesIO(contents)) as zf:
-                for zip_info in zf.infolist():
-                    if zip_info.is_dir():
-                        continue
-                    inner_filename = zip_info.filename
-                    if inner_filename.lower().endswith((".csv", ".xlsx", ".xls", ".txt")):
-                        inner_contents = zf.read(zip_info)
-                        try:
-                            # Use the inner filename as the source
-                            extracted_entries = read_all_text_from_file(inner_filename, inner_contents)
-                            # Update the source_file to indicate it came from the zip
-                            for entry in extracted_entries:
-                                entry["source_file"] = f"{source_file}/{entry.get('source_file', inner_filename)}"
-                            entries.extend(extracted_entries)
-                        except Exception:
-                            pass
-        except Exception as e:
-            raise ValueError(f"Error processing zip file: {e}")
-        return entries
 
     if filename_lower.endswith(".txt"):
         lines = contents.decode("utf-8", errors="replace").splitlines()

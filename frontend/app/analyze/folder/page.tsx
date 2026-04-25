@@ -23,11 +23,6 @@ export default function FolderUploadPage() {
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
-    }
-  };
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
@@ -102,7 +97,7 @@ export default function FolderUploadPage() {
 
   return (
     <AnalyzerLayout
-      title="Full Folder / Archive Scan"
+      title="Full Folder Scan"
       subtitle="Run the entire unified pipeline on multiple files"
       icon="📁"
       color="#14B8A6"
@@ -129,21 +124,6 @@ export default function FolderUploadPage() {
                 <span style={{ fontSize: 24 }}>📁</span>
                 Select a Folder
               </button>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                style={{
-                  flex: 1, padding: "20px 16px", borderRadius: 10, border: "2px dashed #14B8A650",
-                  background: "#14B8A60a", color: "#14B8A6", fontWeight: 600, cursor: "pointer",
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
-                  transition: "all 0.15s"
-                }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#14B8A615")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#14B8A60a")}
-              >
-                <span style={{ fontSize: 24 }}>📦</span>
-                Select .zip Archive
-              </button>
             </div>
             
             <input
@@ -154,14 +134,7 @@ export default function FolderUploadPage() {
               style={{ display: "none" }}
               onChange={handleFolderSelect}
             />
-            <input
-              type="file"
-              accept=".zip,.csv,.xlsx,.xls,.txt"
-              multiple
-              ref={fileInputRef}
-              style={{ display: "none" }}
-              onChange={handleFileSelect}
-            />
+
 
             {files.length > 0 && (
               <div style={{ background: "var(--bg-secondary)", borderRadius: 8, padding: "12px", border: "1px solid var(--border)", maxHeight: 200, overflowY: "auto" }}>
@@ -185,7 +158,7 @@ export default function FolderUploadPage() {
             <div style={{ marginTop: 14, padding: "10px 14px", background: "#14B8A614", border: "1px solid #14B8A630", borderRadius: 8 }}>
               <p style={{ fontSize: 12, color: "#0F766E", fontWeight: 500 }}>
                  ℹ️ **Supported Formats:** .csv, .xlsx, .xls, .txt. <br/>
-                 Any `.zip` archives will be automatically decompressed by the server in-memory to discover these formats.
+                 Any unsupported files in the folder will be safely ignored.
               </p>
             </div>
           </div>
