@@ -83,11 +83,11 @@ const DETECTION_MODES = [
   {
     id: "folder",
     icon: "📁",
-    title: "Full Folder / Archive Scan",
+    title: "Full Folder Scan",
     subtitle: "Unified Pipeline Detection",
     description:
-      "Upload entire folders or .zip archives to automatically extract valid files and run all detection methods out of the box.",
-    tags: ["Folder", "ZIP", "Pipeline"],
+      "Upload entire folders to automatically extract valid files and run all detection methods out of the box.",
+    tags: ["Folder", "Pipeline"],
     color: "#14B8A6",
     route: "/analyze/folder",
   },
