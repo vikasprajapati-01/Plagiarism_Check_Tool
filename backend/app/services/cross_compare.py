@@ -33,7 +33,7 @@ class CellRef:
 
     @property
     def label(self):
-        return f"{self.file_name} > {self.sheet_name} > Cell {self.col_letter}{self.row}"
+        return f"{self.file_name}-{self.col_letter}{self.row}"
 
 
 @dataclass
@@ -51,7 +51,7 @@ class RowRef:
 
     @property
     def label(self):
-        return f"{self.file_name} > {self.sheet_name} > Row {self.row}"
+        return f"{self.file_name}-Row {self.row}"
 
 
 @dataclass

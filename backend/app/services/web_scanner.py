@@ -276,10 +276,11 @@ def _best_matching_excerpt(query: str, page_text: str, char_limit: int = 300) ->
 async def scan_text_online(
     text: str,
     threshold: float = 0.5,
-    max_queries: int = 3,
-    max_results_per_query: int = 5,
+    max_queries: int = 2,
+    max_results_per_query: int = 3,
     timeout: int = 8,
     retries: int = 3,
+    max_scan_time: int = 30,
 ) -> WebScanResult:
     """Search the web for the given text and return all sources above the similarity threshold."""
     if not _DDG_AVAILABLE:
@@ -325,10 +326,17 @@ async def scan_text_online(
         title = result_dict.get("title", "")
         snippet = result_dict.get("body", "")
 
-        page_text, raw_html = await loop.run_in_executor(
-            _EXECUTOR,
-            lambda u=url: _fetch_page_text_sync(u, timeout),
-        )
+        try:
+            page_text, raw_html = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _EXECUTOR,
+                    lambda u=url: _fetch_page_text_sync(u, timeout),
+                ),
+                timeout=timeout + 2,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Page fetch timed out for URL: %s", url)
+            page_text, raw_html = "", ""
         comparison_text = page_text if page_text else snippet
         if not comparison_text:
             return None
@@ -349,9 +357,28 @@ async def scan_text_online(
             fingerprint=_analyze_page(url, page_text, raw_html),
         )
 
-    raw_results = await asyncio.gather(
-        *[_process(r) for r in search_results], return_exceptions=True
-    )
+    try:
+        raw_results = await asyncio.wait_for(
+            asyncio.gather(
+                *[_process(r) for r in search_results],
+                return_exceptions=True,
+            ),
+            timeout=max_scan_time,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Web scan timed out after %ds for text: %.60s...",
+            max_scan_time, text,
+        )
+        return WebScanResult(
+            submitted_text=text,
+            matches=[],
+            is_plagiarism=False,
+            best_score=0.0,
+            best_url=None,
+            total_urls_checked=total_checked,
+            error=f"Scan timed out after {max_scan_time}s",
+        )
     matches = sorted(
         [r for r in raw_results if isinstance(r, WebMatch)],
         key=lambda m: m.best_score,
@@ -375,6 +402,7 @@ async def scan_texts_online(
     max_results_per_query: int = 5,
     timeout: int = 8,
     retries: int = 3,
+    max_scan_time: int = 30,
 ) -> List[WebScanResult]:
     """Run scan_text_online on multiple texts concurrently."""
     return await asyncio.gather(*[
@@ -385,6 +413,7 @@ async def scan_texts_online(
             max_results_per_query=max_results_per_query,
             timeout=timeout,
             retries=retries,
+            max_scan_time=max_scan_time,
         )
         for text in texts
     ])

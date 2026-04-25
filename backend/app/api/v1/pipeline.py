@@ -7,7 +7,7 @@ POST /run-on-server  — runs the pipeline on already-registered server-side bat
 import io
 import json
 import logging
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Optional, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from app.core.models import MethodsConfig, PipelineResult, PipelineRunResult, ServerPipelineRequest
 from app.core.config import settings
 from app.services.pipeline_runner import run_full_pipeline, run_pipeline
-from app.storage.repository import async_fetch_all_texts_by_batch, async_fetch_all_texts_with_batch_info
+from app.storage.repository import async_fetch_all_texts_by_batch
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,6 +33,77 @@ def _get_models(request: Request):
     return sbert, ai
 
 
+@router.post("/columns")
+async def get_pipeline_columns(
+    files: Annotated[
+        List[UploadFile],
+        File(description="One or more Excel/CSV/TXT files to inspect."),
+    ] = [],
+):
+    """Return all column names found across all uploaded files.
+
+    Call this before /run to discover which columns are available.
+    The user selects one as the target_column for detection.
+    If a column named 'Query' is found it is suggested automatically.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Provide at least one file.")
+
+    from app.services.cross_compare import get_available_columns
+
+    parsed_files: List[Tuple[str, bytes]] = []
+    for upload in files:
+        contents = await upload.read()
+        if upload.filename and upload.filename.lower().endswith(
+            (".xlsx", ".xls", ".csv", ".txt")
+        ):
+            parsed_files.append((upload.filename, contents))
+
+    if not parsed_files:
+        raise HTTPException(
+            status_code=400,
+            detail="No supported files found. Upload .xlsx, .xls, .csv, or .txt files.",
+        )
+
+    try:
+        columns_by_sheet = get_available_columns(parsed_files)
+    except Exception as exc:
+        logger.warning("Column discovery failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read columns from files: {exc}",
+        )
+
+    all_columns_set = set()
+    files_info = []
+
+    for sheet_key, col_list in columns_by_sheet.items():
+        parts = sheet_key.split(" > ", 1)
+        fname = parts[0] if parts else sheet_key
+        sname = parts[1] if len(parts) > 1 else ""
+        all_columns_set.update(col_list)
+
+        existing = next((f for f in files_info if f["filename"] == fname), None)
+        if existing:
+            existing["sheets"].append({"sheet": sname, "columns": col_list})
+        else:
+            files_info.append({
+                "filename": fname,
+                "sheets": [{"sheet": sname, "columns": col_list}],
+            })
+
+    all_columns = sorted(all_columns_set)
+    query_found = any(c.lower() == "query" for c in all_columns)
+    suggested = "Query" if query_found else (all_columns[0] if all_columns else "")
+
+    return {
+        "files": files_info,
+        "all_columns": all_columns,
+        "query_column_found": query_found,
+        "suggested_target": suggested,
+    }
+
+
 @router.post("/run")
 async def run_pipeline_endpoint(
     request: Request,
@@ -42,10 +113,7 @@ async def run_pipeline_endpoint(
     ] = [],
     reference_batch_ids: Optional[str] = Form(None),  # JSON array string
     methods: Optional[str] = Form(None),               # JSON object string
-    comparison_scope: str = Form("both"),
-    min_words_for_ai: int = Form(10),
-    min_words_for_web: int = Form(10),
-    min_words_for_cell_exact: int = Form(3),
+    target_column: str = Form(""),
     download_report: bool = Form(False),
     report_format: str = Form("excel"),
     color_report: bool = Form(False),
@@ -74,24 +142,75 @@ async def run_pipeline_endpoint(
     else:
         methods_config = MethodsConfig()
 
-    # ── Validate comparison scope ──────────────────────────────────────────
-    allowed_scopes = {"files", "database", "both"}
-    if comparison_scope not in allowed_scopes:
-        raise HTTPException(
-            status_code=422,
-            detail="Invalid 'comparison_scope'. Must be one of: files, database, both.",
-        )
-
     # ── Read input texts from uploaded files ──────────────────────────────────
     if not files:
         raise HTTPException(
             status_code=400, detail="Provide at least one file."
         )
 
-    parsed_files: List[tuple[str, bytes]] = []
+    parsed_files: List[Tuple[str, bytes]] = []
     for upload in files:
         contents = await upload.read()
         parsed_files.append((upload.filename or "upload.txt", contents))
+
+    # Discover columns from uploaded files
+    from app.services.cross_compare import get_available_columns
+    try:
+        xlsx_files = [
+            (fname, fbytes) for fname, fbytes in parsed_files
+            if fname.lower().endswith((".xlsx", ".xls"))
+        ]
+        columns_by_sheet: dict = {}
+        if xlsx_files:
+            columns_by_sheet = get_available_columns(xlsx_files)
+    except Exception as exc:
+        logger.warning("Column discovery failed: %s", exc)
+        columns_by_sheet = {}
+
+    all_found_columns: set = set()
+    for col_list in columns_by_sheet.values():
+        all_found_columns.update(col_list)
+
+    resolved_target: str = ""
+
+    if not target_column or target_column.strip().lower() == "auto":
+        # Auto-detect: look for Query column
+        query_match = next(
+            (c for c in all_found_columns if c.lower() == "query"), None
+        )
+        if query_match:
+            resolved_target = query_match
+            logger.info("Auto-detected target column: %s", resolved_target)
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "No 'Query' column found in uploaded files. "
+                        "Please specify target_column from the available columns."
+                    ),
+                    "available_columns": sorted(all_found_columns),
+                },
+            )
+    else:
+        # User specified a column — verify it exists
+        match = next(
+            (c for c in all_found_columns if c.lower() == target_column.strip().lower()),
+            None,
+        )
+        if match:
+            resolved_target = match
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        f"Column '{target_column}' not found in uploaded files. "
+                        "Please choose from the available columns."
+                    ),
+                    "available_columns": sorted(all_found_columns),
+                },
+            )
 
     # ── Load reference texts ──────────────────────────────────────────────────
     batch_ids: List[str] = []
@@ -104,34 +223,22 @@ async def run_pipeline_endpoint(
                 detail=f"Invalid 'reference_batch_ids' JSON: {exc}",
             ) from exc
 
-    reference_texts_with_info: List[dict] = []
-    if comparison_scope in {"database", "both"}:
-        reference_texts_with_info = await async_fetch_all_texts_with_batch_info()
-        if batch_ids:
-            reference_texts_with_info = [
-                ref for ref in reference_texts_with_info if ref.get("batch_id") in batch_ids
-            ]
-
     logger.info(
-        "Pipeline run: %d files, %d reference entries, scope=%s, methods=%s",
-        len(parsed_files), len(reference_texts_with_info), comparison_scope, methods_config.model_dump(),
+        "Pipeline run: %d files, target_column=%s, methods=%s",
+        len(parsed_files), resolved_target, methods_config.model_dump(),
     )
 
     result = await run_full_pipeline(
         files=parsed_files,
-        comparison_scope=comparison_scope,
-        reference_texts_with_info=reference_texts_with_info,
         methods_config=methods_config,
         sbert_model=sbert_model,
         ai_model=ai_model,
+        target_column=resolved_target,
         threshold=75.0,
         fuzzy_threshold=settings.FUZZY_THRESHOLD,
         semantic_threshold=settings.SEMANTIC_THRESHOLD,
         web_scan_timeout=settings.WEB_SCAN_TIMEOUT,
         web_scan_retries=settings.WEB_SCAN_RETRIES,
-        min_words_for_ai=min_words_for_ai,
-        min_words_for_web=min_words_for_web,
-        min_words_for_cell_exact=min_words_for_cell_exact,
     )
 
     if download_report:

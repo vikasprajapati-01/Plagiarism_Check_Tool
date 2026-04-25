@@ -166,11 +166,6 @@ class ServerPipelineRequest(BaseModel):
 
 # ── Full pipeline (file + db) result ─────────────────────────────────────────
 
-class ComparisonScope(str, Enum):
-    files = "files"
-    database = "database"
-    both = "both"
-
 
 class DuplicatePairResult(BaseModel):
     original: str
@@ -189,7 +184,6 @@ class WebAiEntryResult(BaseModel):
 class PipelineRunResult(BaseModel):
     pipeline_id: str
     status: str
-    comparison_scope: str
     summary: dict
     row_duplicates: List[DuplicatePairResult]
     cell_duplicates: List[DuplicatePairResult]

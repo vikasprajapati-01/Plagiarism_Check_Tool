@@ -34,11 +34,10 @@ class Settings(BaseSettings):
     # ── Web scanner ───────────────────────────────────────────────────────────
     WEB_SCAN_TIMEOUT: int = 10
     WEB_SCAN_RETRIES: int = 1
-
-    # ── Minimum word thresholds ───────────────────────────────────────────────
-    MIN_WORDS_FOR_AI: int = 10
-    MIN_WORDS_FOR_WEB: int = 10
-    MIN_WORDS_FOR_CELL_EXACT: int = 3
+    WEB_SCAN_MAX_QUERIES: int = 1
+    WEB_SCAN_MAX_RESULTS: int = 2
+    WEB_SCAN_MAX_SCAN_TIME: int = 25
+    WEB_SCAN_OVERALL_TIMEOUT: int = 60
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
