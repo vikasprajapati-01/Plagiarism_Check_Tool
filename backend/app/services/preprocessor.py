@@ -94,9 +94,13 @@ def read_all_text_from_file(
         return entries
 
     if filename_lower.endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(contents))
+        sheets = {"": pd.read_csv(io.BytesIO(contents))}
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
-        df = pd.read_excel(io.BytesIO(contents), sheet_name=0)
+        # Read all sheets so downstream AI/Web/License processing matches
+        # cross-compare behavior (which parses every sheet).
+        sheets = pd.read_excel(io.BytesIO(contents), sheet_name=None)
+        if not sheets:
+            sheets = {"": pd.DataFrame()}
     else:
         raise ValueError("Unsupported file format. Supported: CSV, XLSX, XLS, TXT")
 
@@ -114,49 +118,52 @@ def read_all_text_from_file(
     }
 
     entries: List[Dict[str, object]] = []
-    total_rows = len(df.index)
 
-    for col_index, col in enumerate(df.columns):
-        col_name = str(col)
-        col_name_normalized = col_name.strip().lower().replace(" ", "")
-        if col_name_normalized in skip_names:
-            continue
-
-        series = df[col]
+    for sheet_name, df in sheets.items():
+        total_rows = len(df.index)
         if total_rows == 0:
             continue
 
-        empty_mask = series.isna() | series.astype(str).str.strip().eq("")
-        numeric_mask = pd.to_numeric(series, errors="coerce").notna() & ~empty_mask
-
-        if empty_mask.mean() > 0.8:
-            continue
-        if numeric_mask.mean() > 0.8:
-            continue
-
-        col_letter = _column_letter(col_index)
-
-        for row_index, value in enumerate(series.tolist(), start=1):
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                continue
-            raw_text = str(value).strip()
-            if not raw_text:
+        for col_index, col in enumerate(df.columns):
+            col_name = str(col)
+            col_name_normalized = col_name.strip().lower().replace(" ", "")
+            if col_name_normalized in skip_names:
                 continue
 
-            cleaned_text = preprocess_text(raw_text)
-            row_number = row_index
-            cell_ref = f"{col_letter}{row_number + 1}"
+            series = df[col]
 
-            entries.append(
-                {
-                    "text": raw_text,
-                    "cleaned_text": cleaned_text,
-                    "sha256": _sha256(cleaned_text),
-                    "source_file": source_file,
-                    "row_number": row_number,
-                    "column_name": col_name,
-                    "cell_ref": cell_ref,
-                }
-            )
+            empty_mask = series.isna() | series.astype(str).str.strip().eq("")
+            numeric_mask = pd.to_numeric(series, errors="coerce").notna() & ~empty_mask
+
+            if empty_mask.mean() > 0.8:
+                continue
+            if numeric_mask.mean() > 0.8:
+                continue
+
+            col_letter = _column_letter(col_index)
+
+            for row_index, value in enumerate(series.tolist(), start=1):
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    continue
+                raw_text = str(value).strip()
+                if not raw_text:
+                    continue
+
+                cleaned_text = preprocess_text(raw_text)
+                row_number = row_index
+                cell_ref = f"{col_letter}{row_number + 1}"
+
+                entries.append(
+                    {
+                        "text": raw_text,
+                        "cleaned_text": cleaned_text,
+                        "sha256": _sha256(cleaned_text),
+                        "source_file": source_file,
+                        "sheet_name": sheet_name,
+                        "row_number": row_number,
+                        "column_name": col_name,
+                        "cell_ref": cell_ref,
+                    }
+                )
 
     return entries

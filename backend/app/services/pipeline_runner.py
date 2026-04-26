@@ -362,6 +362,28 @@ async def run_full_pipeline(
     def _clamp_pct(value: float) -> float:
         return max(0.0, min(100.0, value))
 
+    def _ai_probability(ai_payload: Optional[dict]) -> float:
+        """Convert detector payload into probability that text is AI-generated.
+
+        detect_ai_content() returns a dict with:
+          - label: "AI" | "Human" | "Unknown"
+          - confidence: score for the predicted label
+        For "Human" predictions, P(AI) is approximated as (1 - confidence).
+        """
+        if not ai_payload:
+            return 0.0
+        label = (ai_payload.get("label") or "").strip()
+        try:
+            confidence = float(ai_payload.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        if label == "AI":
+            return max(0.0, min(1.0, confidence))
+        if label == "Human":
+            return max(0.0, min(1.0, 1.0 - confidence))
+        return 0.0
+
     def _extract_xlsx_from_zip(filename: str, contents: bytes) -> List[Tuple[str, bytes]]:
         if not filename.lower().endswith(".zip"):
             return []
@@ -448,6 +470,15 @@ async def run_full_pipeline(
                     continue
                 target_entries.append(entry)
 
+    # Throttle web/AI/license processing so large uploads don't overwhelm the executor
+    # and trigger the global WEB_SCAN_OVERALL_TIMEOUT.
+    _max_concurrency = 4
+    _entry_semaphore = asyncio.Semaphore(_max_concurrency)
+
+    async def _bounded_process(entry: dict) -> Optional[WebAiEntryResult]:
+        async with _entry_semaphore:
+            return await _process_single_entry(entry)
+
     async def _process_single_entry(entry: dict) -> Optional[WebAiEntryResult]:
         raw_text = entry.get("text", "")
         run_ai = methods_config.ai_detection and ai_model is not None
@@ -504,18 +535,13 @@ async def run_full_pipeline(
             if matches_list:
                 source_url = getattr(matches_list[0], "url", None)
 
-        ai_pct = 0.0
-        if ai_result is not None:
-            label = ai_result.get("label")
-            confidence = float(ai_result.get("confidence", 0.0))
-            if label == "AI":
-                ai_pct = _clamp_pct(round(confidence * 100, 1))
+        ai_pct = _clamp_pct(round(_ai_probability(ai_result) * 100, 1))
+
+        if ai_pct < 50.0 and not is_plagiarised:
+            return None
 
         source_str = source_url if source_url else "N/A"
         plagiarised_str = "Yes" if is_plagiarised else "No"
-
-        if not (is_plagiarised or ai_pct > 0.0):
-            return None
 
         return WebAiEntryResult(
             original=f"{entry.get('source_file')}-{entry.get('cell_ref')}",
@@ -526,26 +552,32 @@ async def run_full_pipeline(
 
     if target_entries:
         try:
-            all_entry_results = await asyncio.wait_for(
-                asyncio.gather(
-                    *[_process_single_entry(e) for e in target_entries],
-                    return_exceptions=True,
-                ),
+            tasks = [asyncio.create_task(_bounded_process(e)) for e in target_entries]
+            done, pending = await asyncio.wait(
+                tasks,
                 timeout=settings.WEB_SCAN_OVERALL_TIMEOUT,
             )
-            for res in all_entry_results:
-                if isinstance(res, Exception):
-                    logger.warning(
-                        "Entry processing error: %s", res
-                    )
-                elif res is not None:
+
+            for t in done:
+                try:
+                    res = t.result()
+                except Exception as exc:
+                    logger.warning("Entry processing error: %s", exc)
+                    continue
+
+                if res is not None:
                     web_ai_results.append(res)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Web/AI detection block timed out after %ds — "
-                "returning partial results",
-                settings.WEB_SCAN_OVERALL_TIMEOUT,
-            )
+
+            if pending:
+                logger.warning(
+                    "Web/AI detection block timed out after %ds — "
+                    "returning %d/%d completed results",
+                    settings.WEB_SCAN_OVERALL_TIMEOUT,
+                    len(done),
+                    len(tasks),
+                )
+                for t in pending:
+                    t.cancel()
         except asyncio.CancelledError:
             logger.warning(
                 "Web/AI detection block was cancelled — "
@@ -562,6 +594,8 @@ async def run_full_pipeline(
         "near_cell_matches": sum(1 for r in cell_duplicates if r.type == "Near"),
         "plagiarised_entries": sum(1 for r in web_ai_results if r.plagiarised == "Yes"),
         "ai_detected_entries": sum(1 for r in web_ai_results if r.ai_detected_pct > 50.0),
+        "web_ai_total_entries": len(target_entries),
+        "web_ai_returned_entries": len(web_ai_results),
     }
 
     return PipelineRunResult(
