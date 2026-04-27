@@ -58,7 +58,8 @@ export default function Footer() {
             {[
               { label: "Home", href: "#home" },
               { label: "About", href: "#about" },
-              { label: "Analyzer", href: "#analyzer" },
+              { label: "Analyze", href: "/analyze" },
+              { label: "Register", href: "/register" },
             ].map((link) => (
               <a
                 key={link.href}
@@ -79,36 +80,29 @@ export default function Footer() {
             ))}
           </div>
 
-          {/* Detection Modes */}
+          {/* Analyzer */}
           <div>
             <p style={{ fontWeight: 700, fontSize: 14, color: "var(--text-primary)", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              Detection Modes
+              Analyzer
             </p>
-            {[
-              { label: "Exact Duplicate", href: "/analyze/exact" },
-              { label: "Fuzzy Matching", href: "/analyze/fuzzy" },
-              { label: "Semantic Similarity", href: "/analyze/semantic" },
-              { label: "AI Content", href: "/analyze/ai-detect" },
-              { label: "Web Scan", href: "/analyze/web-scan" },
-              { label: "License Check", href: "/analyze/license" },
-            ].map((link) => (
-              <a
-                key={link.href}
-                href={link.href}
-                style={{
-                  display: "block",
-                  fontSize: 14,
-                  color: "var(--text-secondary)",
-                  textDecoration: "none",
-                  marginBottom: 9,
-                  transition: "color 0.15s",
-                }}
-                onMouseEnter={(e) => ((e.target as HTMLElement).style.color = "var(--accent)")}
-                onMouseLeave={(e) => ((e.target as HTMLElement).style.color = "var(--text-secondary)")}
-              >
-                {link.label}
-              </a>
-            ))}
+            <a
+              href="/analyze"
+              style={{
+                display: "block",
+                fontSize: 14,
+                color: "var(--text-secondary)",
+                textDecoration: "none",
+                marginBottom: 10,
+                transition: "color 0.15s",
+              }}
+              onMouseEnter={(e) => ((e.target as HTMLElement).style.color = "var(--accent)")}
+              onMouseLeave={(e) => ((e.target as HTMLElement).style.color = "var(--text-secondary)")}
+            >
+              Upload & Run Scan
+            </a>
+            <p style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.55, maxWidth: 260 }}>
+              Upload files or folders, toggle web scan / AI detection, preview results, and download reports.
+            </p>
           </div>
 
           {/* Tech Stack */}

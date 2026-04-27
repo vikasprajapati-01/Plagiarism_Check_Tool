@@ -22,7 +22,7 @@ export default function SemanticDetectPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -54,7 +54,9 @@ export default function SemanticDetectPage() {
         const a = document.createElement("a"); a.href = url; a.download = `semantic_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -120,16 +122,44 @@ export default function SemanticDetectPage() {
         <SubmitButton loading={loading} color="#06B6D4" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#06B6D4" renderResult={(r) => (
-        <>
-          {r.is_duplicate !== undefined && <ResultRow label="Semantic Duplicate" value={r.is_duplicate ? "✅ Match found" : "🟢 No duplicate"} highlight={r.is_duplicate} />}
-          {r.similarity_score !== undefined && <ResultRow label="Cosine Similarity" value={(r.similarity_score * 100).toFixed(1) + "%"} />}
-          {r.matched_text && <ResultRow label="Closest Match" value={r.matched_text} />}
-          {r.threshold && <ResultRow label="Threshold" value={String(r.threshold)} />}
-          {r.duplicate_pairs !== undefined && <ResultRow label="Duplicate Pairs" value={String(r.duplicate_pairs)} highlight={r.duplicate_pairs > 0} />}
-          {r.total_texts !== undefined && <ResultRow label="Total Texts" value={String(r.total_texts)} />}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#06B6D4" renderResult={(r) => {
+        const hasIsDuplicate = typeof r.is_duplicate === "boolean";
+        const isDuplicate = r.is_duplicate === true;
+
+        const similarityScore = typeof r.similarity_score === "number" ? r.similarity_score : null;
+        const matchedText = typeof r.matched_text === "string" ? r.matched_text : null;
+        const thresholdUsed = typeof r.threshold === "number" ? r.threshold : (typeof r.threshold === "string" ? r.threshold : null);
+        const duplicatePairs = typeof r.duplicate_pairs === "number" ? r.duplicate_pairs : null;
+        const totalTexts = typeof r.total_texts === "number" ? r.total_texts : null;
+
+        return (
+          <>
+            {hasIsDuplicate && (
+              <ResultRow
+                label="Semantic Duplicate"
+                value={isDuplicate ? "✅ Match found" : "🟢 No duplicate"}
+                highlight={isDuplicate}
+              />
+            )}
+            {similarityScore !== null && (
+              <ResultRow
+                label="Cosine Similarity"
+                value={(similarityScore * 100).toFixed(1) + "%"}
+              />
+            )}
+            {matchedText && <ResultRow label="Closest Match" value={matchedText} />}
+            {thresholdUsed !== null && <ResultRow label="Threshold" value={String(thresholdUsed)} />}
+            {duplicatePairs !== null && (
+              <ResultRow
+                label="Duplicate Pairs"
+                value={String(duplicatePairs)}
+                highlight={duplicatePairs > 0}
+              />
+            )}
+            {totalTexts !== null && <ResultRow label="Total Texts" value={String(totalTexts)} />}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }

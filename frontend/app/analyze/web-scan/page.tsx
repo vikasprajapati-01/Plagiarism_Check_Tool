@@ -3,7 +3,7 @@
 import { useState } from "react";
 import AnalyzerLayout from "../AnalyzerLayout";
 import {
-  TextAreaField, InputField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
+  TextAreaField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
@@ -20,7 +20,7 @@ export default function WebScanPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -52,7 +52,9 @@ export default function WebScanPage() {
         const a = document.createElement("a"); a.href = url; a.download = `web_scan_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -101,21 +103,44 @@ export default function WebScanPage() {
         <SubmitButton loading={loading} color="#10B981" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#10B981" renderResult={(r) => (
-        <>
-          {r.is_plagiarism !== undefined && <ResultRow label="Plagiarism Detected" value={r.is_plagiarism ? "⚠️ YES — Found on web" : "🟢 CLEAN"} highlight={r.is_plagiarism} />}
-          {r.best_score !== undefined && <ResultRow label="Best Similarity Score" value={(r.best_score * 100).toFixed(1) + "%"} />}
-          {r.best_url && (
-            <div style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
-              <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Best Match URL</p>
-              <a href={r.best_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", wordBreak: "break-all" }}>{r.best_url}</a>
-            </div>
-          )}
-          {r.total_urls_checked !== undefined && <ResultRow label="URLs Checked" value={String(r.total_urls_checked)} />}
-          {r.matches_found !== undefined && <ResultRow label="Matches Found" value={String(r.matches_found)} />}
-          {r.plagiarism_detected !== undefined && <ResultRow label="Texts with Plagiarism" value={String(r.plagiarism_detected)} highlight={r.plagiarism_detected > 0} />}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#10B981" renderResult={(r) => {
+        const isPlagiarism = typeof r.is_plagiarism === "boolean" ? r.is_plagiarism : null;
+        const bestScore = typeof r.best_score === "number" ? r.best_score : null;
+        const bestUrl = typeof r.best_url === "string" ? r.best_url : null;
+        const totalUrlsChecked = typeof r.total_urls_checked === "number" ? r.total_urls_checked : null;
+        const matchesFound = typeof r.matches_found === "number" ? r.matches_found : null;
+        const plagiarismDetected = typeof r.plagiarism_detected === "number" ? r.plagiarism_detected : null;
+
+        return (
+          <>
+            {isPlagiarism !== null && (
+              <ResultRow
+                label="Plagiarism Detected"
+                value={isPlagiarism ? "⚠️ YES — Found on web" : "🟢 CLEAN"}
+                highlight={isPlagiarism}
+              />
+            )}
+            {bestScore !== null && (
+              <ResultRow label="Best Similarity Score" value={(bestScore * 100).toFixed(1) + "%"} />
+            )}
+            {bestUrl && (
+              <div style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+                <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>Best Match URL</p>
+                <a href={bestUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", wordBreak: "break-all" }}>{bestUrl}</a>
+              </div>
+            )}
+            {totalUrlsChecked !== null && <ResultRow label="URLs Checked" value={String(totalUrlsChecked)} />}
+            {matchesFound !== null && <ResultRow label="Matches Found" value={String(matchesFound)} />}
+            {plagiarismDetected !== null && (
+              <ResultRow
+                label="Texts with Plagiarism"
+                value={String(plagiarismDetected)}
+                highlight={plagiarismDetected > 0}
+              />
+            )}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }

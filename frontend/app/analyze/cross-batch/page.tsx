@@ -17,7 +17,7 @@ export default function CrossBatchPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -38,7 +38,9 @@ export default function CrossBatchPage() {
         const a = document.createElement("a"); a.href = url; a.download = `cross_batch_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -79,32 +81,67 @@ export default function CrossBatchPage() {
         <SubmitButton loading={loading} color="#EC4899" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#EC4899" renderResult={(r) => (
-        <>
-          <ResultRow label="Total Submitted" value={String(r.total_submitted)} />
-          <ResultRow label="Total References Checked" value={String(r.total_references)} />
-          <ResultRow label="Duplicates Found" value={String(r.total_duplicates)} highlight={r.total_duplicates > 0} />
-          <ResultRow label="Method Used" value={r.method?.toUpperCase() ?? "-"} />
-          {Array.isArray(r.results) && r.results.length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <p style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 8 }}>Per-Text Results:</p>
-              {r.results.map((item: any, i: number) => (
-                <div key={i} style={{ background: "var(--bg-secondary)", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: `1px solid ${item.is_duplicate ? "#EC489930" : "var(--border)"}` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontSize: 13, color: "var(--text-secondary)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: 10 }}>{item.submitted_text}</span>
-                    <span style={{ fontWeight: 700, fontSize: 13, flexShrink: 0, color: item.is_duplicate ? "#EF4444" : "#22C55E" }}>{item.is_duplicate ? "DUP" : "CLEAN"}</span>
-                  </div>
-                  {item.is_duplicate && (
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
-                      Matched in batch: <strong>{item.matched_batch_name ?? item.matched_batch_id}</strong> · Risk: {item.risk_level}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#EC4899" renderResult={(r) => {
+        const totalSubmitted = typeof r.total_submitted === "number" ? r.total_submitted : null;
+        const totalReferences = typeof r.total_references === "number" ? r.total_references : null;
+        const totalDuplicates = typeof r.total_duplicates === "number" ? r.total_duplicates : null;
+        const methodUsed = typeof r.method === "string" ? r.method.toUpperCase() : "-";
+        const results = Array.isArray(r.results) ? r.results : [];
+
+        return (
+          <>
+            <ResultRow label="Total Submitted" value={String(totalSubmitted ?? "—")} />
+            <ResultRow label="Total References Checked" value={String(totalReferences ?? "—")} />
+            <ResultRow
+              label="Duplicates Found"
+              value={String(totalDuplicates ?? "—")}
+              highlight={(totalDuplicates ?? 0) > 0}
+            />
+            <ResultRow label="Method Used" value={methodUsed} />
+
+            {results.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 8 }}>Per-Text Results:</p>
+                {results.map((item: unknown, i: number) => {
+                  const obj = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
+                  const submittedText = typeof obj.submitted_text === "string" ? obj.submitted_text : "";
+                  const isDuplicate = obj.is_duplicate === true;
+                  const matchedBatchName = typeof obj.matched_batch_name === "string" ? obj.matched_batch_name : null;
+                  const matchedBatchId = typeof obj.matched_batch_id === "string" ? obj.matched_batch_id : null;
+                  const riskLevel = typeof obj.risk_level === "string" ? obj.risk_level : "";
+
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        background: "var(--bg-secondary)",
+                        borderRadius: 10,
+                        padding: "12px 14px",
+                        marginBottom: 8,
+                        border: `1px solid ${isDuplicate ? "#EC489930" : "var(--border)"}`,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: 13, color: "var(--text-secondary)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: 10 }}>
+                          {submittedText}
+                        </span>
+                        <span style={{ fontWeight: 700, fontSize: 13, flexShrink: 0, color: isDuplicate ? "#EF4444" : "#22C55E" }}>
+                          {isDuplicate ? "DUP" : "CLEAN"}
+                        </span>
+                      </div>
+                      {isDuplicate && (
+                        <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+                          Matched in batch: <strong>{matchedBatchName ?? matchedBatchId ?? "—"}</strong> · Risk: {riskLevel || "—"}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }

@@ -34,9 +34,6 @@
   --text-primary:  #F4F4F4;
   --text-secondary:#B0B0B0;
   --text-muted:    #666666;
-  --accent:        #818CF8;
-  --accent-2:      #A78BFA;
-  --accent-glow:   rgba(129,140,248,0.20);
   --shadow-sm:     0 1px 3px rgba(0,0,0,0.40);
   --shadow-md:     0 4px 16px rgba(0,0,0,0.50);
   --shadow-lg:     0 8px 40px rgba(0,0,0,0.60);
