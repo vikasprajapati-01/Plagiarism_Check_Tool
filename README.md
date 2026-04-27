@@ -50,7 +50,7 @@ This tool detects all of the above, produces structured reports, and ensures dat
 | asyncpg / psycopg2 | Async and sync Postgres drivers |
 | pandas | Excel/CSV ingestion and cleaning |
 | sentence-transformers | SBERT semantic similarity (all-MiniLM-L6-v2) |
-| transformers | AI-generated content detection (RoBERTa) |
+| transformers | AI-generated content detection (GPT-2 perplexity) |
 | openpyxl | Excel report export + cross-compare reports |
 | python-dotenv | Environment management |
 | ddgs / duckduckgo_search | Web search |
@@ -84,7 +84,7 @@ backend/
     │   ├── __init__.py
     │   ├── config.py                  # pydantic-settings, all env vars
     │   ├── models.py                  # shared Pydantic schemas
-    │   └── model_cache.py             # SBERT + RoBERTa loaded once
+        │   └── model_cache.py             # SBERT + GPT-2 loaded once
     ├── models/
     │   └── schemas.py                 # (empty placeholder)
     ├── api/
@@ -101,7 +101,7 @@ backend/
     │   ├── exact_match.py             # SHA-256 exact duplicate detection
     │   ├── fuzzy_match.py             # Levenshtein, Jaccard, N-gram
     │   ├── semantic_match.py          # SBERT cosine similarity
-    │   ├── ai_detector.py             # RoBERTa AI content detection
+        │   ├── ai_detector.py             # GPT-2 perplexity AI detection
     │   ├── web_scanner.py             # DuckDuckGo + BeautifulSoup web scan
     │   ├── license_detector.py        # SPDX + copyright detection
     │   ├── cross_compare.py           # cross-sheet row/cell comparison
@@ -227,7 +227,7 @@ CREATE TABLE web_ai_result (
 
 ### Register Flow (Excel/CSV/TXT/ZIP to reference_text)
 1. Upload file(s) to `POST /api/v1/ingest/reference/register` (ZIP can contain CSV/XLSX/XLS/TXT files).
-2. `preprocessor.read_all_text_from_file()` reads the first sheet (Excel) or CSV/TXT, and for ZIP files it recursively parses supported files inside the archive:
+2. `preprocessor.read_all_text_from_file()` reads all sheets (Excel) or CSV/TXT, and for ZIP files it recursively parses supported files inside the archive:
    - Skips index-like columns (S.No, ID, etc.) and mostly numeric/empty columns.
    - Emits one entry per non-empty cell with `source_file`, `row_number`, `column_name`, and `cell_ref`.
 3. Each entry is normalized via `preprocess_text()` and hashed (SHA-256).
@@ -253,7 +253,7 @@ CREATE TABLE web_ai_result (
 | Exact Match | SHA-256 hash comparison | 100% identical | services/exact_match.py |
 | Fuzzy Match | Levenshtein, Jaccard, N-gram | 0.85 default (Jaccard 0.68, N-gram 0.765) | services/fuzzy_match.py |
 | Semantic Match | SBERT cosine similarity | 0.85 | services/semantic_match.py |
-| AI Detection | RoBERTa classifier | Returns confidence 0.0–1.0 | services/ai_detector.py |
+| AI Detection | GPT-2 perplexity scoring | Returns confidence 0.0–1.0 | services/ai_detector.py |
 | Web Scanner | DuckDuckGo + BeautifulSoup + windowed similarity | 0.50 similarity (default), 10s timeout, 3 retries | services/web_scanner.py |
 | License Detector | SPDX + copyright patterns | N/A | services/license_detector.py |
 | Cross-Compare | Row/Cell comparison across Excel files | 75% (default) | services/cross_compare.py |

@@ -22,7 +22,7 @@ class MethodsConfig(BaseModel):
     fuzzy: bool = True
     semantic: bool = True
     ai_detection: bool = True
-    web_scan: bool = False
+    web_scan: bool = True
     license_check: bool = True
 
 

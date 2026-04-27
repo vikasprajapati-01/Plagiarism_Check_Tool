@@ -33,7 +33,7 @@ class CellRef:
 
     @property
     def label(self):
-        return f"{self.file_name}-{self.col_letter}{self.row}"
+        return f"{self.file_name}-{self.sheet_name}-{self.col_letter}{self.row}"
 
 
 @dataclass
@@ -44,14 +44,17 @@ class RowRef:
     cells: List[CellRef] = field(default_factory=list)
     combined_raw: str = ""
     combined_cleaned: str = ""
+    query_raw: str = ""
+    query_cleaned: str = ""
 
     def __post_init__(self):
         self.combined_raw = " | ".join(c.raw_value for c in self.cells if c.raw_value)
         self.combined_cleaned = preprocess_text(self.combined_raw)
+        self.query_cleaned = preprocess_text(self.query_raw) if self.query_raw else ""
 
     @property
     def label(self):
-        return f"{self.file_name}-Row {self.row}"
+        return f"{self.file_name}-{self.sheet_name}-Row {self.row}"
 
 
 @dataclass
@@ -118,12 +121,35 @@ def _find_col_index(headers, col_name):
     return None
 
 
+def _is_header_row(row, headers):
+    """Return True if the row looks like a header row.
+
+    This catches repeated header rows inside the sheet, e.g. "S. No., Query, ...".
+    """
+    header_set = {h for h in headers if h}
+    if not header_set:
+        return False
+
+    row_values = []
+    for cell in row:
+        val = str(cell.value).strip().lower() if cell.value is not None else ""
+        if val:
+            row_values.append(val)
+
+    if not row_values:
+        return False
+
+    # If every non-empty cell matches a known header, treat this row as a header.
+    return all(v in header_set for v in row_values)
+
+
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
-def parse_excel_file(file_name, contents, target_column=None):
+def parse_excel_file(file_name, contents, target_column=None, filter_to_target=False):
     """Parse all sheets. Returns (rows, cells).
 
     target_column: "auto" = detect Query col, specific name = that col only, None = all.
+    filter_to_target: if True, only include the target column in cells/rows.
     """
     wb = load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
     all_rows, all_cells = [], []
@@ -150,11 +176,18 @@ def parse_excel_file(file_name, contents, target_column=None):
                         target_idx = _find_col_index(headers, target_column)
                 continue
 
+            if _is_header_row(row, headers):
+                continue
+
             row_cells = []
+            query_val = ""
             for ci, cell in enumerate(row, 1):
                 if ci in skip_cols:
                     continue
-                if target_idx is not None and ci != target_idx:
+                if target_idx is not None and ci == target_idx:
+                    query_val = str(cell.value).strip() if cell.value is not None else ""
+
+                if filter_to_target and target_idx is not None and ci != target_idx:
                     continue
 
                 val = str(cell.value).strip() if cell.value is not None else ""
@@ -167,7 +200,7 @@ def parse_excel_file(file_name, contents, target_column=None):
                 all_cells.append(ref)
 
             if row_cells:
-                all_rows.append(RowRef(file_name, sname, row_idx, row_cells))
+                all_rows.append(RowRef(file_name, sname, row_idx, row_cells, query_raw=query_val))
 
     wb.close()
     return all_rows, all_cells
@@ -191,7 +224,16 @@ def compare_rows(rows, threshold=75.0):
         if not a.combined_cleaned or not b.combined_cleaned:
             continue
 
-        if a.combined_cleaned == b.combined_cleaned:
+        if a.query_cleaned and b.query_cleaned:
+            if a.query_cleaned == b.query_cleaned:
+                query_sim = 100.0
+            else:
+                query_sim = levenshtein_similarity(a.query_cleaned, b.query_cleaned) * 100
+
+            if query_sim < threshold:
+                continue
+
+        if a.combined_cleaned == b.combined_cleaned and (a.query_cleaned == b.query_cleaned or not a.query_cleaned):
             matches.append(_make_match(
                 a.label, b.label, a.combined_raw, b.combined_raw,
                 "Exact", 100.0, "Row", a.sheet_name, a.row, 0, b.sheet_name, b.row, 0))
@@ -232,12 +274,28 @@ def compare_cells(cells, threshold=75.0):
 
 def run_cross_comparison(files, threshold=75.0, do_row_compare=True,
                          do_cell_compare=True, target_column="auto"):
-    """Parse files and run cross-comparison. Returns (row_matches, cell_matches)."""
-    all_rows, all_cells = [], []
+    """Parse files and run cross-comparison. Returns (row_matches, cell_matches).
+
+    Row-row comparison: uses the FULL row (all columns concatenated) so that
+    we detect duplicate rows regardless of which column is the query column.
+
+    Cell-cell comparison: restricted to the target_column only (query column),
+    so we flag duplicate query texts across sheets/files.
+    """
+    all_rows: List[RowRef] = []
+    all_cells: List[CellRef] = []
+
     for fname, contents in files:
-        rows, cells = parse_excel_file(fname, contents, target_column)
-        all_rows.extend(rows)
-        all_cells.extend(cells)
+        # Full-row parse: no column filter so every cell in the row is included.
+        if do_row_compare:
+            # Row compare: keep all columns, but track target column as the primary text.
+            rows, _ = parse_excel_file(fname, contents, target_column=target_column, filter_to_target=False)
+            all_rows.extend(rows)
+
+        # Cell parse: restricted to the target column only.
+        if do_cell_compare:
+            _, cells = parse_excel_file(fname, contents, target_column, filter_to_target=True)
+            all_cells.extend(cells)
 
     row_matches = compare_rows(all_rows, threshold) if do_row_compare else []
     cell_matches = compare_cells(all_cells, threshold) if do_cell_compare else []

@@ -293,7 +293,7 @@ async def scan_text_online(
             error="beautifulsoup4 not installed. Run: pip install beautifulsoup4 lxml",
         )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     queries = extract_search_queries(text, max_queries=max_queries)
 
     seen_urls: set = set()

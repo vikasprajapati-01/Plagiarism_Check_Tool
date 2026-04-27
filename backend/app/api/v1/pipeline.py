@@ -9,6 +9,8 @@ import json
 import logging
 from typing import Annotated, List, Optional, Tuple
 
+import pandas as pd
+
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
@@ -22,15 +24,20 @@ router = APIRouter()
 
 
 def _get_models(request: Request):
-    """Retrieve pre-loaded models from app.state. Raises 503 if not ready."""
+    """Retrieve pre-loaded models from app.state. Raises 503 if SBERT not ready.
+
+    GPT-2 may be None when torch/transformers are absent — AI detection
+    degrades gracefully in that case rather than blocking the whole pipeline.
+    """
     sbert = getattr(request.app.state, "sbert_model", None)
-    ai = getattr(request.app.state, "ai_model", None)
-    if sbert is None or ai is None:
+    if sbert is None:
         raise HTTPException(
             status_code=503,
-            detail="Models are not yet loaded. Retry in a moment.",
+            detail="SBERT model is not yet loaded. Retry in a moment.",
         )
-    return sbert, ai
+    gpt2_tokenizer = getattr(request.app.state, "gpt2_tokenizer", None)
+    gpt2_model     = getattr(request.app.state, "gpt2_model", None)
+    return sbert, gpt2_tokenizer, gpt2_model
 
 
 @router.post("/columns")
@@ -127,7 +134,7 @@ async def run_pipeline_endpoint(
     - download_report: reserved for future use (report served via /reports/combined).
     - report_format: reserved for future use.
     """
-    sbert_model, ai_model = _get_models(request)
+    sbert_model, gpt2_tokenizer, gpt2_model = _get_models(request)
 
     # ── Parse methods config ──────────────────────────────────────────────────
     if methods:
@@ -153,19 +160,25 @@ async def run_pipeline_endpoint(
         contents = await upload.read()
         parsed_files.append((upload.filename or "upload.txt", contents))
 
-    # Discover columns from uploaded files
+    # ── Discover columns from all uploaded files (XLSX, CSV, TXT) ───────────
     from app.services.cross_compare import get_available_columns
-    try:
-        xlsx_files = [
-            (fname, fbytes) for fname, fbytes in parsed_files
-            if fname.lower().endswith((".xlsx", ".xls"))
-        ]
-        columns_by_sheet: dict = {}
-        if xlsx_files:
-            columns_by_sheet = get_available_columns(xlsx_files)
-    except Exception as exc:
-        logger.warning("Column discovery failed: %s", exc)
-        columns_by_sheet = {}
+    columns_by_sheet: dict = {}
+    for fname, fbytes in parsed_files:
+        fname_lower = fname.lower()
+        try:
+            if fname_lower.endswith((".xlsx", ".xls")):
+                cols = get_available_columns([(fname, fbytes)])
+                columns_by_sheet.update(cols)
+            elif fname_lower.endswith(".csv"):
+                df_hdr = pd.read_csv(io.BytesIO(fbytes), nrows=0)
+                col_list = [str(c) for c in df_hdr.columns]
+                if col_list:
+                    columns_by_sheet[f"{fname} > Sheet1"] = col_list
+            elif fname_lower.endswith(".txt"):
+                # TXT files have a single implicit column named "text"
+                columns_by_sheet[f"{fname} > text"] = ["text"]
+        except Exception as exc:
+            logger.warning("Column discovery failed for %s: %s", fname, exc)
 
     all_found_columns: set = set()
     for col_list in columns_by_sheet.values():
@@ -174,13 +187,17 @@ async def run_pipeline_endpoint(
     resolved_target: str = ""
 
     if not target_column or target_column.strip().lower() == "auto":
-        # Auto-detect: look for Query column
+        # 1. Prefer an explicit "Query" column.
         query_match = next(
             (c for c in all_found_columns if c.lower() == "query"), None
         )
         if query_match:
             resolved_target = query_match
             logger.info("Auto-detected target column: %s", resolved_target)
+        elif len(all_found_columns) == 1:
+            # 2. Single-column file (e.g. TXT) — use it automatically.
+            resolved_target = next(iter(all_found_columns))
+            logger.info("Single column available, using: %s", resolved_target)
         else:
             raise HTTPException(
                 status_code=422,
@@ -232,7 +249,8 @@ async def run_pipeline_endpoint(
         files=parsed_files,
         methods_config=methods_config,
         sbert_model=sbert_model,
-        ai_model=ai_model,
+        gpt2_tokenizer=gpt2_tokenizer,
+        gpt2_model=gpt2_model,
         target_column=resolved_target,
         threshold=75.0,
         fuzzy_threshold=settings.FUZZY_THRESHOLD,
@@ -268,7 +286,7 @@ async def run_pipeline_on_server(request: Request, body: ServerPipelineRequest):
     Useful for large datasets that are pre-uploaded via /ingest/reference/register.
     All texts in the specified batches are loaded and checked against each other.
     """
-    sbert_model, ai_model = _get_models(request)
+    sbert_model, gpt2_tokenizer, gpt2_model = _get_models(request)
 
     if not body.batch_ids:
         raise HTTPException(
@@ -295,9 +313,10 @@ async def run_pipeline_on_server(request: Request, body: ServerPipelineRequest):
     return await run_pipeline(
         texts=all_texts,
         methods_config=body.methods,
-        reference_texts=all_texts,  # cross-check within the batch set
+        reference_texts=all_texts,
         sbert_model=sbert_model,
-        ai_model=ai_model,
+        gpt2_tokenizer=gpt2_tokenizer,
+        gpt2_model=gpt2_model,
         fuzzy_threshold=settings.FUZZY_THRESHOLD,
         semantic_threshold=settings.SEMANTIC_THRESHOLD,
         web_scan_timeout=settings.WEB_SCAN_TIMEOUT,

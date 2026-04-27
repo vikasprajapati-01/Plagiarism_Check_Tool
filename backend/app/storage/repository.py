@@ -42,14 +42,18 @@ def _get_conn():
 # ── Async connection pool ─────────────────────────────────────────────────────
 
 _pool: Optional[asyncpg.Pool] = None
-_pool_lock = asyncio.Lock()
+_pool_lock: Optional[asyncio.Lock] = None  # created lazily inside an async context
 
 
 async def _get_pool() -> asyncpg.Pool:
     """Lazy singleton pool — created once, reused by all async functions."""
-    global _pool
+    global _pool, _pool_lock
     if _pool is not None:
         return _pool
+    # Create the lock lazily here, inside an async context, so it is bound
+    # to the correct running event loop (avoids DeprecationWarning on 3.10+).
+    if _pool_lock is None:
+        _pool_lock = asyncio.Lock()
     async with _pool_lock:
         if _pool is None:
             db_url = os.getenv("DATABASE_URL")

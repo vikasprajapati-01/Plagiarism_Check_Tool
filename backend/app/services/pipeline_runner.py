@@ -145,9 +145,13 @@ async def _run_semantic(
     )
 
 
-async def _run_ai(text: str, detector: Any) -> AIDetectionResult:
-    """Run AI-content detection on one text."""
-    result = await detect_ai_content(text, detector)
+async def _run_ai(
+    text: str,
+    gpt2_tokenizer: Any,
+    gpt2_model: Any,
+) -> AIDetectionResult:
+    """Run GPT-2 perplexity AI-content detection on one text."""
+    result = await detect_ai_content(text, gpt2_tokenizer, gpt2_model)
     return AIDetectionResult(
         is_ai_generated=result["label"] == "AI",
         confidence=result["confidence"],
@@ -204,7 +208,8 @@ async def run_pipeline(
     methods_config: MethodsConfig,
     reference_texts: List[str],
     sbert_model: Any,
-    ai_model: Any,
+    gpt2_tokenizer: Optional[Any],
+    gpt2_model: Optional[Any],
     fuzzy_threshold: float = 0.85,
     semantic_threshold: float = 0.85,
     web_scan_timeout: int = 10,
@@ -234,7 +239,7 @@ async def run_pipeline(
     ref_vecs: List[List[float]] = []
 
     if methods_config.semantic and sbert_model is not None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         all_texts = preprocessed_inputs + preprocessed_refs
         if all_texts:
             from app.services.semantic_match import encode_texts as _encode
@@ -257,8 +262,8 @@ async def run_pipeline(
             tasks["fuzzy"] = _run_fuzzy(raw_text, reference_texts, fuzzy_threshold)
         if methods_config.semantic and input_vecs:
             tasks["semantic"] = _run_semantic(idx, input_vecs, reference_texts, ref_vecs, semantic_threshold)
-        if methods_config.ai_detection and ai_model is not None:
-            tasks["ai_detection"] = _run_ai(raw_text, ai_model)
+        if methods_config.ai_detection and gpt2_model is not None:
+            tasks["ai_detection"] = _run_ai(raw_text, gpt2_tokenizer, gpt2_model)
         if methods_config.web_scan:
             tasks["web_scan"] = _run_web(raw_text, web_scan_timeout, web_scan_retries)
         if methods_config.license_check:
@@ -346,7 +351,8 @@ async def run_full_pipeline(
     files: List[Tuple[str, bytes]],
     methods_config: MethodsConfig,
     sbert_model: Any,
-    ai_model: Any,
+    gpt2_tokenizer: Optional[Any],
+    gpt2_model: Optional[Any],
     target_column: str = "Query",
     threshold: float = 75.0,
     fuzzy_threshold: float = 0.85,
@@ -363,21 +369,26 @@ async def run_full_pipeline(
         return max(0.0, min(100.0, value))
 
     def _ai_probability(ai_payload: Optional[dict]) -> float:
-        """Convert detector payload into probability that text is AI-generated.
+        """Extract AI probability from the new GPT-2 detector payload.
 
-        detect_ai_content() returns a dict with:
-          - label: "AI" | "Human" | "Unknown"
-          - confidence: score for the predicted label
-        For "Human" predictions, P(AI) is approximated as (1 - confidence).
+        The payload now includes 'ai_pct' (0–100) directly. Falls back to
+        the label/confidence approach for backwards compatibility.
         """
         if not ai_payload:
             return 0.0
+        # Prefer the direct ai_pct field (new GPT-2 detector)
+        ai_pct = ai_payload.get("ai_pct")
+        if ai_pct is not None:
+            try:
+                return max(0.0, min(1.0, float(ai_pct) / 100.0))
+            except (TypeError, ValueError):
+                pass
+        # Legacy fallback (label + confidence)
         label = (ai_payload.get("label") or "").strip()
         try:
             confidence = float(ai_payload.get("confidence", 0.0))
         except (TypeError, ValueError):
             confidence = 0.0
-
         if label == "AI":
             return max(0.0, min(1.0, confidence))
         if label == "Human":
@@ -413,7 +424,7 @@ async def run_full_pipeline(
             entries_by_file[filename] = []
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         from functools import partial
 
         compare_files: List[Tuple[str, bytes]] = []
@@ -481,7 +492,7 @@ async def run_full_pipeline(
 
     async def _process_single_entry(entry: dict) -> Optional[WebAiEntryResult]:
         raw_text = entry.get("text", "")
-        run_ai = methods_config.ai_detection and ai_model is not None
+        run_ai = methods_config.ai_detection and gpt2_model is not None
         run_web = methods_config.web_scan
         run_license = methods_config.license_check
 
@@ -500,7 +511,7 @@ async def run_full_pipeline(
             )
         if run_ai:
             tasks_inner["ai_detection"] = detect_ai_content(
-                raw_text, ai_model
+                raw_text, gpt2_tokenizer, gpt2_model
             )
         if run_license:
             tasks_inner["license_check"] = detect_license(raw_text)
@@ -543,8 +554,10 @@ async def run_full_pipeline(
         source_str = source_url if source_url else "N/A"
         plagiarised_str = "Yes" if is_plagiarised else "No"
 
+        sheet = entry.get("sheet_name") or ""
+        sheet_part = f"-{sheet}" if sheet else ""
         return WebAiEntryResult(
-            original=f"{entry.get('source_file')}-{entry.get('cell_ref')}",
+            original=f"{entry.get('source_file')}{sheet_part}-{entry.get('cell_ref')}",
             plagiarised=plagiarised_str,
             source=source_str,
             ai_detected_pct=ai_pct,

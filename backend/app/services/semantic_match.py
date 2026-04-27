@@ -122,7 +122,7 @@ async def is_semantic_duplicate(
         return False, None, None
 
     all_texts = [text] + list(candidate_texts)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     all_vecs = await loop.run_in_executor(
         None,
         partial(encode_texts, all_texts, model, True),

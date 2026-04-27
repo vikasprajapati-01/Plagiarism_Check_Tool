@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # ── ML Models ─────────────────────────────────────────────────────────────
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
-    AI_DETECTION_MODEL: str = "openai-community/roberta-large-openai-detector"
+    GPT2_MODEL: str = "gpt2"  # 117M params, ~500 MB — for perplexity-based AI detection
 
     # ── Detection thresholds ──────────────────────────────────────────────────
     FUZZY_THRESHOLD: float = 0.85

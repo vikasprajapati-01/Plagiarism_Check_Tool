@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.model_cache import load_models
+from app.core.model_cache import load_models, get_sbert_model, get_gpt2_tokenizer, get_gpt2_model
 from app.api.v1.router import api_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -32,12 +32,13 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up — loading ML models …")
     load_models(
         embedding_model=settings.EMBEDDING_MODEL,
-        ai_detection_model=settings.AI_DETECTION_MODEL,
+        gpt2_model=settings.GPT2_MODEL,
     )
     # Store on app.state so any request handler can access them
-    from app.core.model_cache import get_sbert_model, get_ai_model
-    app.state.sbert_model = get_sbert_model()
-    app.state.ai_model = get_ai_model()
+    from app.core.model_cache import get_sbert_model, get_gpt2_tokenizer, get_gpt2_model
+    app.state.sbert_model    = get_sbert_model()
+    app.state.gpt2_tokenizer = get_gpt2_tokenizer()  # may be None (non-fatal)
+    app.state.gpt2_model     = get_gpt2_model()       # may be None (non-fatal)
     logger.info("Startup complete.")
 
     yield  # ── application is running ───────────────────────────────────────
