@@ -384,7 +384,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 EMBEDDING_MODEL=all-MiniLM-L6-v2
-AI_DETECTION_MODEL=openai-community/roberta-large-openai-detector
+GPT2_MODEL=gpt2
 FUZZY_THRESHOLD=0.85
 SEMANTIC_THRESHOLD=0.85
 WEB_SCAN_TIMEOUT=10
@@ -426,7 +426,7 @@ npm run dev
 | FastAPI over Flask/Django | Async-first APIs for concurrent web scanning and batch inference |
 | PostgreSQL + pgvector | Single store for structured data and embeddings |
 | SBERT all-MiniLM-L6-v2 | Balanced performance for sentence-level similarity |
-| RoBERTa AI detector | High-accuracy AI detection with swap via env var |
+| GPT-2 AI detector | High-accuracy AI detection with swap via env var |
 | DuckDuckGo web scan | No API key required; controlled retries and timeout |
 | Per-cell provenance | Enables exact row/column traceability in reports |
 | Startup model cache | Single-load model initialization via lifespan |
