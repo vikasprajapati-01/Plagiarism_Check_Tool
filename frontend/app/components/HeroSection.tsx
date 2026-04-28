@@ -112,7 +112,7 @@ export default function HeroSection() {
           }}
         >
           <a
-            href="#analyzer"
+            href="/analyze"
             style={{
               padding: "14px 32px",
               borderRadius: 12,

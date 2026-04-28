@@ -7,7 +7,7 @@ import { useTheme } from "./ThemeProvider";
 const NAV_LINKS = [
   { label: "Home",      href: "#home" },
   { label: "About",     href: "#about" },
-  { label: "Analyzer",  href: "#analyzer" },
+  { label: "Analyze",   href: "/analyze" },
   { label: "Register",  href: "/register" },
 ];
 
@@ -78,7 +78,7 @@ export default function Navbar() {
         {/* Desktop Nav */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }} className="desktop-nav">
           {NAV_LINKS.map((link) => (
-            <a
+            <Link
               key={link.href}
               href={link.href}
               style={{
@@ -100,7 +100,7 @@ export default function Navbar() {
               }}
             >
               {link.label}
-            </a>
+            </Link>
           ))}
         </div>
 
@@ -137,8 +137,8 @@ export default function Navbar() {
           </button>
 
           {/* CTA */}
-          <a
-            href="#analyzer"
+          <Link
+            href="/analyze"
             style={{
               padding: "9px 20px",
               borderRadius: 10,
@@ -153,7 +153,7 @@ export default function Navbar() {
             }}
           >
             Try Now
-          </a>
+          </Link>
 
           {/* Mobile Hamburger */}
           <button
@@ -191,7 +191,7 @@ export default function Navbar() {
           }}
         >
           {NAV_LINKS.map((link) => (
-            <a
+            <Link
               key={link.href}
               href={link.href}
               onClick={() => setMenuOpen(false)}
@@ -205,7 +205,7 @@ export default function Navbar() {
               }}
             >
               {link.label}
-            </a>
+            </Link>
           ))}
         </div>
       )}

@@ -63,8 +63,18 @@ This tool detects all of the above, produces structured reports, and ensures dat
 | Library | Purpose |  
 |---|---|
 | Next.js 16 (App Router) | React framework |
+| React 19 | UI runtime |
 | TypeScript | Type-safe frontend code |
-| Tailwind CSS (via PostCSS) | Styling |
+| Tailwind CSS (via PostCSS) | Styling and utility classes |
+| pdfjs-dist | PDF parsing for analyze flows |
+| xlsx | Excel parsing for analyze flows |
+
+## Frontend Notes
+
+- Pages are under `frontend/app/` using the App Router.
+- Analyze routes include: `exact`, `fuzzy`, `semantic`, `ai-detect`, `web-scan`, `license`, `cross-batch`.
+- Theme is handled by `ThemeProvider` and CSS variables in `frontend/app/globals.css`.
+- Theme toggles are in `frontend/app/components/Navbar.tsx` and `frontend/app/analyze/AnalyzerLayout.tsx`.
 
 ## Repository Structure
 

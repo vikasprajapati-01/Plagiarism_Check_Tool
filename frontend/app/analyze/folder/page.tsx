@@ -11,11 +11,10 @@ export default function FolderUploadPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -67,7 +66,7 @@ export default function FolderUploadPage() {
         try {
             const d = await res.json();
             errMessage = d.detail || errMessage;
-        } catch (_) {}
+        } catch {}
         throw new Error(errMessage);
       }
 
@@ -88,8 +87,8 @@ export default function FolderUploadPage() {
         setResult(await res.json());
       }
 
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Pipeline execution failed");
     } finally {
       setLoading(false);
     }
@@ -128,7 +127,7 @@ export default function FolderUploadPage() {
             
             <input
               type="file"
-              // @ts-ignore
+              // @ts-expect-error -- non-standard attribute enables folder selection in Chromium-based browsers
               webkitdirectory=""
               ref={folderInputRef}
               style={{ display: "none" }}
@@ -179,21 +178,35 @@ export default function FolderUploadPage() {
         error={error}
         color="#14B8A6"
         renderResult={(r) => {
-          if (r.downloaded) return null;
-          const { summary } = r;
+          const downloaded = r.downloaded === true;
+          if (downloaded) return null;
+
+          const status = typeof r.status === "string" ? r.status.toUpperCase() : "";
+          const summary = typeof r.summary === "object" && r.summary !== null ? (r.summary as Record<string, unknown>) : null;
           if (!summary) return null;
+
+          const totalEntries = typeof summary.total_entries === "number" ? summary.total_entries : null;
+          const flagged = typeof summary.flagged === "number" ? summary.flagged : null;
+          const riskBreakdown = typeof summary.risk_breakdown === "object" && summary.risk_breakdown !== null
+            ? (summary.risk_breakdown as Record<string, unknown>)
+            : null;
+
+          const high = typeof riskBreakdown?.high === "number" ? riskBreakdown.high : 0;
+          const medium = typeof riskBreakdown?.medium === "number" ? riskBreakdown.medium : 0;
+          const low = typeof riskBreakdown?.low === "number" ? riskBreakdown.low : 0;
+          const none = typeof riskBreakdown?.none === "number" ? riskBreakdown.none : 0;
           return (
             <>
-              <ResultRow label="Status" value={r.status.toUpperCase()} highlight={false} />
-              <ResultRow label="Total Entries Analysed" value={String(summary.total_entries)} />
-              <ResultRow label="Total Flagged Elements" value={String(summary.flagged)} highlight={summary.flagged > 0} />
+              <ResultRow label="Status" value={status || "—"} highlight={false} />
+              <ResultRow label="Total Entries Analysed" value={String(totalEntries ?? "—")} />
+              <ResultRow label="Total Flagged Elements" value={String(flagged ?? "—")} highlight={(flagged ?? 0) > 0} />
               <div style={{ marginTop: 14 }}>
                  <p style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 8 }}>Risk Breakdown:</p>
                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "stretch" }}>
-                   <Badge label="High Risk" count={summary.risk_breakdown?.high || 0} color="#EF4444" />
-                   <Badge label="Medium Risk" count={summary.risk_breakdown?.medium || 0} color="#F59E0B" />
-                   <Badge label="Low Risk" count={summary.risk_breakdown?.low || 0} color="#3B82F6" />
-                   <Badge label="No Risk" count={summary.risk_breakdown?.none || 0} color="#10B981" />
+                   <Badge label="High Risk" count={high} color="#EF4444" />
+                   <Badge label="Medium Risk" count={medium} color="#F59E0B" />
+                   <Badge label="Low Risk" count={low} color="#3B82F6" />
+                   <Badge label="No Risk" count={none} color="#10B981" />
                  </div>
               </div>
             </>

@@ -22,7 +22,7 @@ export default function FuzzyDetectPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -54,7 +54,9 @@ export default function FuzzyDetectPage() {
         const a = document.createElement("a"); a.href = url; a.download = `fuzzy_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -111,15 +113,36 @@ export default function FuzzyDetectPage() {
         <SubmitButton loading={loading} color="#8B5CF6" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#8B5CF6" renderResult={(r) => (
-        <>
-          {r.is_duplicate !== undefined && <ResultRow label="Duplicate" value={r.is_duplicate ? "✅ Duplicate found" : "🟢 No duplicate"} highlight={r.is_duplicate} />}
-          {r.matched_text && <ResultRow label="Matched Text" value={r.matched_text} />}
-          {r.threshold && <ResultRow label="Threshold Used" value={String(r.threshold)} />}
-          {r.duplicate_pairs !== undefined && <ResultRow label="Duplicate Pairs Found" value={String(r.duplicate_pairs)} highlight={r.duplicate_pairs > 0} />}
-          {r.total_texts !== undefined && <ResultRow label="Total Texts Checked" value={String(r.total_texts)} />}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#8B5CF6" renderResult={(r) => {
+        const isDuplicate = r.is_duplicate === true;
+        const hasIsDuplicate = typeof r.is_duplicate === "boolean";
+        const matchedText = typeof r.matched_text === "string" ? r.matched_text : null;
+        const thresholdUsed = typeof r.threshold === "number" ? r.threshold : (typeof r.threshold === "string" ? r.threshold : null);
+        const duplicatePairs = typeof r.duplicate_pairs === "number" ? r.duplicate_pairs : null;
+        const totalTexts = typeof r.total_texts === "number" ? r.total_texts : null;
+
+        return (
+          <>
+            {hasIsDuplicate && (
+              <ResultRow
+                label="Duplicate"
+                value={isDuplicate ? "✅ Duplicate found" : "🟢 No duplicate"}
+                highlight={isDuplicate}
+              />
+            )}
+            {matchedText && <ResultRow label="Matched Text" value={matchedText} />}
+            {thresholdUsed !== null && <ResultRow label="Threshold Used" value={String(thresholdUsed)} />}
+            {duplicatePairs !== null && (
+              <ResultRow
+                label="Duplicate Pairs Found"
+                value={String(duplicatePairs)}
+                highlight={duplicatePairs > 0}
+              />
+            )}
+            {totalTexts !== null && <ResultRow label="Total Texts Checked" value={String(totalTexts)} />}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }

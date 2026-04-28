@@ -46,8 +46,8 @@ export default function RegisterPage() {
         model: data.model,
         batch_name: batchName.trim() || "Auto-generated",
       });
-    } catch (err: any) {
-      setError(err.message || "Something went wrong");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
     }

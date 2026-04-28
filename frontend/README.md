@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend (Next.js)
 
-## Getting Started
+PlagiaCheck frontend built with Next.js (App Router). Includes the marketing landing page and analysis flows with a shared, theme-aware UI.
 
-First, run the development server:
+## Requirements
+
+- Node.js 18+
+- npm (or pnpm/yarn/bun)
+
+## Setup
+
+```bash
+npm install
+```
+
+## Run
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App runs at http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm run start
+```
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
+- `npm run dev` - Dev server
+- `npm run build` - Production build
+- `npm run start` - Start production server
+- `npm run lint` - ESLint
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## App Structure
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `app/` - Next.js App Router pages
+- `app/analyze/*` - Analysis pages (exact, fuzzy, semantic, AI-detect, web-scan, license, cross-batch)
+- `app/components/` - Shared UI components and theme provider
+- `app/globals.css` - Design tokens, themes, utilities, and animations
 
-## Deploy on Vercel
+## Theming
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Theme is controlled via `ThemeProvider` and CSS variables.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Light and dark palettes are defined in `app/globals.css` using `:root` and `.dark` tokens.
+- The `ThemeProvider` sets the `dark` class on `html` and persists the preference in `localStorage`.
+- Theme toggle buttons are in `app/components/Navbar.tsx` and `app/analyze/AnalyzerLayout.tsx`.
+
+## Notes
+
+- Inline styles rely on CSS variables to stay theme-safe and consistent.
+- PDF/XLSX uploads are supported in the analyze flows via `pdfjs-dist` and `xlsx`.

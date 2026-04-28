@@ -3,7 +3,7 @@
 import { useState, useRef } from "react";
 import AnalyzerLayout from "../AnalyzerLayout";
 import {
-  TextAreaField, RadioGroup, SliderField, ReportSection, SubmitButton, ResultPanel, ResultRow,
+  TextAreaField, RadioGroup, SliderField, SubmitButton, ResultPanel, ResultRow,
 } from "../exact/page";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
@@ -18,7 +18,7 @@ export default function LicenseCheckPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("xlsx");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -46,7 +46,9 @@ export default function LicenseCheckPage() {
         const a = document.createElement("a"); a.href = url; a.download = `license_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -111,27 +113,68 @@ export default function LicenseCheckPage() {
         <SubmitButton loading={loading} color="#EF4444" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#EF4444" renderResult={(r) => (
-        <>
-          {r.has_license !== undefined && <ResultRow label="License Detected" value={r.has_license ? "⚠️ License found" : "🟢 No license found"} highlight={r.has_license} />}
-          {r.risk_level && <ResultRow label="Risk Level" value={r.risk_level.toUpperCase()} highlight={r.risk_level !== "none"} />}
-          {r.total_matches !== undefined && <ResultRow label="Total Matches" value={String(r.total_matches)} />}
-          {r.primary_license && (
-            <>
-              <ResultRow label="Primary License" value={`${r.primary_license.name} (${r.primary_license.spdx_id})`} />
-              <ResultRow label="Confidence" value={(r.primary_license.confidence * 100).toFixed(1) + "%"} />
-              {r.primary_license.license_url && (
-                <div style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
-                  <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>License URL</p>
-                  <a href={r.primary_license.license_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", wordBreak: "break-all" }}>{r.primary_license.license_url}</a>
-                </div>
-              )}
-            </>
-          )}
-          {r.total !== undefined && <ResultRow label="Total Texts Processed" value={String(r.total)} />}
-          {r.licenses_found !== undefined && <ResultRow label="Texts with Licenses" value={String(r.licenses_found)} highlight={r.licenses_found > 0} />}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#EF4444" renderResult={(r) => {
+        const hasLicense = typeof r.has_license === "boolean" ? r.has_license : null;
+        const riskLevel = typeof r.risk_level === "string" ? r.risk_level : null;
+        const totalMatches = typeof r.total_matches === "number" ? r.total_matches : null;
+        const total = typeof r.total === "number" ? r.total : null;
+        const licensesFound = typeof r.licenses_found === "number" ? r.licenses_found : null;
+
+        const primaryLicense = typeof r.primary_license === "object" && r.primary_license !== null
+          ? (r.primary_license as Record<string, unknown>)
+          : null;
+        const primaryName = typeof primaryLicense?.name === "string" ? primaryLicense.name : null;
+        const primarySpdx = typeof primaryLicense?.spdx_id === "string" ? primaryLicense.spdx_id : null;
+        const primaryConfidence = typeof primaryLicense?.confidence === "number" ? primaryLicense.confidence : null;
+        const primaryUrl = typeof primaryLicense?.license_url === "string" ? primaryLicense.license_url : null;
+
+        return (
+          <>
+            {hasLicense !== null && (
+              <ResultRow
+                label="License Detected"
+                value={hasLicense ? "⚠️ License found" : "🟢 No license found"}
+                highlight={hasLicense}
+              />
+            )}
+            {riskLevel && (
+              <ResultRow
+                label="Risk Level"
+                value={riskLevel.toUpperCase()}
+                highlight={riskLevel !== "none"}
+              />
+            )}
+            {totalMatches !== null && <ResultRow label="Total Matches" value={String(totalMatches)} />}
+
+            {primaryLicense && (primaryName || primarySpdx) && (
+              <>
+                <ResultRow
+                  label="Primary License"
+                  value={`${primaryName ?? "—"} (${primarySpdx ?? "—"})`}
+                />
+                {primaryConfidence !== null && (
+                  <ResultRow label="Confidence" value={(primaryConfidence * 100).toFixed(1) + "%"} />
+                )}
+                {primaryUrl && (
+                  <div style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+                    <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>License URL</p>
+                    <a href={primaryUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", wordBreak: "break-all" }}>{primaryUrl}</a>
+                  </div>
+                )}
+              </>
+            )}
+
+            {total !== null && <ResultRow label="Total Texts Processed" value={String(total)} />}
+            {licensesFound !== null && (
+              <ResultRow
+                label="Texts with Licenses"
+                value={String(licensesFound)}
+                highlight={licensesFound > 0}
+              />
+            )}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }

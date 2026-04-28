@@ -15,7 +15,7 @@ export default function ExactDetectPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -41,7 +41,9 @@ export default function ExactDetectPage() {
       } else {
         setResult(await res.json());
       }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -87,7 +89,11 @@ export default function ExactDetectPage() {
       </form>
 
       <ResultPanel result={result} error={error} color="#6366F1" renderResult={(r) => (
-        <ResultRow label="Duplicate Found" value={r.is_duplicate ? "✅ YES — Duplicate detected" : "🟢 CLEAN — No duplicate found"} highlight={r.is_duplicate} />
+        <ResultRow
+          label="Duplicate Found"
+          value={r.is_duplicate === true ? "✅ YES — Duplicate detected" : "🟢 CLEAN — No duplicate found"}
+          highlight={r.is_duplicate === true}
+        />
       )} />
     </AnalyzerLayout>
   );
@@ -237,18 +243,42 @@ export function SubmitButton({ loading, color }: { loading: boolean; color: stri
   );
 }
 
-export function ResultPanel({ result, error, color, renderResult }: { result: any; error: string | null; color: string; renderResult: (r: any) => React.ReactNode }) {
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function ResultPanel({
+  result,
+  error,
+  color,
+  renderResult,
+}: {
+  result: unknown;
+  error: string | null;
+  color: string;
+  renderResult: (r: Record<string, unknown>) => React.ReactNode;
+}) {
   if (error) return (
     <div style={{ background: "#EF444418", border: "1px solid #EF444440", borderRadius: 14, padding: "20px" }}>
       <p style={{ color: "#EF4444", fontWeight: 600 }}>❌ Error: {error}</p>
     </div>
   );
   if (!result) return null;
-  if (result.downloaded) return (
+
+  if (isJsonObject(result) && result.downloaded === true) return (
     <div style={{ background: "#22C55E18", border: "1px solid #22C55E40", borderRadius: 14, padding: "20px" }}>
       <p style={{ color: "#22C55E", fontWeight: 600 }}>✅ Report downloaded successfully!</p>
     </div>
   );
+
+  if (!isJsonObject(result)) {
+    return (
+      <div style={{ background: "#EF444418", border: "1px solid #EF444440", borderRadius: 14, padding: "20px" }}>
+        <p style={{ color: "#EF4444", fontWeight: 600 }}>❌ Unexpected response format.</p>
+      </div>
+    );
+  }
+
   return (
     <div style={{ background: "var(--bg-card)", border: `1px solid ${color}30`, borderRadius: 14, padding: "24px", boxShadow: `0 4px 20px ${color}15` }}>
       <h3 style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 16, fontSize: 16 }}>Results</h3>

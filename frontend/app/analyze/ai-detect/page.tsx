@@ -17,7 +17,7 @@ export default function AIDetectPage() {
   const [downloadReport, setDownloadReport] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState("excel");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<unknown | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -44,7 +44,9 @@ export default function AIDetectPage() {
         const a = document.createElement("a"); a.href = url; a.download = `ai_detection_report.${downloadFormat === "csv" ? "csv" : "xlsx"}`; a.click();
         setResult({ downloaded: true });
       } else { setResult(await res.json()); }
-    } catch (err: any) { setError(err.message); }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Request failed");
+    }
     finally { setLoading(false); }
   };
 
@@ -100,25 +102,52 @@ export default function AIDetectPage() {
         <SubmitButton loading={loading} color="#F59E0B" />
       </form>
 
-      <ResultPanel result={result} error={error} color="#F59E0B" renderResult={(r) => (
-        <>
-          {r.label && <ResultRow label="Classification" value={r.label === "AI" ? "🤖 AI-Generated" : "✍️ Human-Written"} highlight={r.label === "AI"} />}
-          {r.confidence !== undefined && <ResultRow label="Confidence" value={(r.confidence * 100).toFixed(1) + "%"} />}
-          {r.raw_label && <ResultRow label="Raw Model Label" value={r.raw_label} />}
-          {r.total !== undefined && <ResultRow label="Total Texts Processed" value={String(r.total)} />}
-          {Array.isArray(r.results) && (
-            <div style={{ marginTop: 12 }}>
-              <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>Per-text results:</p>
-              {r.results.slice(0, 10).map((item: any, i: number) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
-                  <span style={{ color: "var(--text-secondary)", flex: 1, marginRight: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.text_preview}</span>
-                  <span style={{ fontWeight: 700, color: item.label === "AI" ? "#EF4444" : "#22C55E", flexShrink: 0 }}>{item.label} ({(item.confidence * 100).toFixed(0)}%)</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )} />
+      <ResultPanel result={result} error={error} color="#F59E0B" renderResult={(r) => {
+        const label = typeof r.label === "string" ? r.label : null;
+        const confidence = typeof r.confidence === "number" ? r.confidence : null;
+        const rawLabel = typeof r.raw_label === "string" ? r.raw_label : null;
+        const total = typeof r.total === "number" ? r.total : null;
+        const results = Array.isArray(r.results) ? r.results : null;
+
+        return (
+          <>
+            {label && (
+              <ResultRow
+                label="Classification"
+                value={label === "AI" ? "🤖 AI-Generated" : "✍️ Human-Written"}
+                highlight={label === "AI"}
+              />
+            )}
+            {confidence !== null && <ResultRow label="Confidence" value={(confidence * 100).toFixed(1) + "%"} />}
+            {rawLabel && <ResultRow label="Raw Model Label" value={rawLabel} />}
+            {total !== null && <ResultRow label="Total Texts Processed" value={String(total)} />}
+
+            {results && (
+              <div style={{ marginTop: 12 }}>
+                <p style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>Per-text results:</p>
+                {results.slice(0, 10).map((item: unknown, i: number) => {
+                  const obj = typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {};
+                  const itemPreview = typeof obj.text_preview === "string" ? obj.text_preview : "";
+                  const itemLabel = typeof obj.label === "string" ? obj.label : "";
+                  const itemConf = typeof obj.confidence === "number" ? obj.confidence : null;
+                  const isAI = itemLabel === "AI";
+                  const pct = itemConf !== null ? (itemConf * 100).toFixed(0) : "?";
+                  return (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+                      <span style={{ color: "var(--text-secondary)", flex: 1, marginRight: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {itemPreview}
+                      </span>
+                      <span style={{ fontWeight: 700, color: isAI ? "#EF4444" : "#22C55E", flexShrink: 0 }}>
+                        {itemLabel || "—"} ({pct}%)
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        );
+      }} />
     </AnalyzerLayout>
   );
 }
