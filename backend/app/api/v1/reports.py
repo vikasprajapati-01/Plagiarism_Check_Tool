@@ -4,10 +4,13 @@ Accepts a PipelineRunResult-style JSON body and returns a 3-sheet Excel file.
 """
 
 import io
+import json
 import logging
-from typing import List
+import re
+import zipfile
+from typing import Dict, List, Optional, Set, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -18,6 +21,7 @@ _EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml
 
 try:
     import pandas as pd
+    from openpyxl import load_workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
     _EXCEL_AVAILABLE = True
@@ -194,6 +198,174 @@ def generate_pipeline_report(
             ws.freeze_panes = "A2"
 
     return buf.getvalue()
+
+
+# ── Helpers for cleaned-output endpoint ──────────────────────────────────────
+
+def _parse_label(
+    label: str,
+    known_files: Set[str],
+) -> Optional[Tuple[str, str, int]]:
+    """Parse a pipeline label into (file_name, sheet_name, excel_row_number).
+
+    Label formats produced by cross_compare.py and pipeline_runner.py:
+      Row  : "filename-SheetName-Row 5"   → row = 5
+      Cell : "filename-SheetName-B5"      → row = 5
+      Web  : "filename-SheetName-B5"      → row = 5  (same as cell)
+    """
+    # Row format: suffix is "-Row <digits>"
+    row_match = re.search(r"-Row (\d+)$", label)
+    if row_match:
+        row_num = int(row_match.group(1))
+        prefix = label[: row_match.start()]  # "file_name-sheet_name"
+    else:
+        # Cell/Web format: suffix is "-<LETTERS><digits>"
+        cell_match = re.search(r"-([A-Z]+)(\d+)$", label)
+        if not cell_match:
+            return None
+        row_num = int(cell_match.group(2))
+        prefix = label[: cell_match.start()]  # "file_name-sheet_name"
+
+    # Match prefix against known uploaded filenames (longest first to handle
+    # filenames that themselves contain hyphens).
+    for fname in sorted(known_files, key=len, reverse=True):
+        if prefix == fname:
+            return (fname, "", row_num)
+        if prefix.startswith(fname + "-"):
+            sheet = prefix[len(fname) + 1 :]
+            return (fname, sheet, row_num)
+
+    return None  # could not resolve to a known file
+
+
+# ── POST /cleaned ─────────────────────────────────────────────────────────────
+
+@router.post("/cleaned")
+async def cleaned_report(
+    files: List[UploadFile] = File(default=[]),
+    row_duplicates: str = Form(default="[]"),
+    cell_duplicates: str = Form(default="[]"),
+    web_ai_results: str = Form(default="[]"),
+):
+    """Return cleaned .xlsx file(s) with duplicate / plagiarised rows removed.
+
+    Rules:
+      - row_duplicates / cell_duplicates : the *duplicate* row is deleted;
+        the *original* row is kept.
+      - web_ai_results : the *original* row is deleted only when
+        plagiarised == "Yes".  AI-only entries are left untouched.
+      - Only .xlsx files are processed.  CSV / TXT are ignored.
+      - Row 1 (header) is never deleted.
+    """
+    if not _EXCEL_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="openpyxl / pandas not installed.",
+        )
+
+    # ── Parse JSON form fields ────────────────────────────────────────────────
+    try:
+        row_dups: List[dict] = json.loads(row_duplicates)
+        cell_dups: List[dict] = json.loads(cell_duplicates)
+        web_ai: List[dict] = json.loads(web_ai_results)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON in form field: {exc}")
+
+    # ── Read only .xlsx uploads ───────────────────────────────────────────────
+    xlsx_files: List[Tuple[str, bytes]] = []
+    for upload in files:
+        fname = upload.filename or ""
+        if fname.lower().endswith(".xlsx"):
+            xlsx_files.append((fname, await upload.read()))
+
+    if not xlsx_files:
+        raise HTTPException(
+            status_code=400,
+            detail="No .xlsx files provided. Cleaned output only works with Excel (.xlsx) files.",
+        )
+
+    known_files: Set[str] = {fname for fname, _ in xlsx_files}
+
+    # ── Build deletion map: { filename → { sheet → set of row numbers } } ────
+    rows_to_delete: Dict[str, Dict[str, Set[int]]] = {}
+
+    def _mark(label: str) -> None:
+        parsed = _parse_label(label, known_files)
+        if parsed is None:
+            return
+        fname, sheet, row_num = parsed
+        rows_to_delete.setdefault(fname, {}).setdefault(sheet, set()).add(row_num)
+
+    # Duplicate pairs → delete the *duplicate* side
+    for pair in row_dups:
+        _mark(pair.get("duplicate", ""))
+    for pair in cell_dups:
+        _mark(pair.get("duplicate", ""))
+
+    # Web/AI → delete the *original* only when explicitly plagiarised
+    for entry in web_ai:
+        if str(entry.get("plagiarised", "")).strip().lower() == "yes":
+            _mark(entry.get("original", ""))
+
+    logger.info(
+        "Cleaned report: %d xlsx file(s), deletion map=%s",
+        len(xlsx_files),
+        {k: {s: sorted(v) for s, v in d.items()} for k, d in rows_to_delete.items()},
+    )
+
+    # ── Process each file ─────────────────────────────────────────────────────
+    cleaned_files: List[Tuple[str, bytes]] = []
+
+    for fname, contents in xlsx_files:
+        file_deletions = rows_to_delete.get(fname, {})
+
+        try:
+            wb = load_workbook(io.BytesIO(contents))
+        except Exception as exc:
+            logger.warning("Failed to open workbook %s: %s", fname, exc)
+            continue
+
+        for sname in wb.sheetnames:
+            sheet_rows: Set[int] = file_deletions.get(sname, set())
+            if not sheet_rows:
+                continue
+            ws = wb[sname]
+            max_row = ws.max_row or 1
+            # Delete in reverse order so earlier row indices stay valid
+            for row_num in sorted(sheet_rows, reverse=True):
+                if row_num > 1 and row_num <= max_row:  # never delete header (row 1)
+                    ws.delete_rows(row_num)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        base = fname.rsplit(".", 1)[0]
+        cleaned_files.append((f"{base}_cleaned.xlsx", buf.getvalue()))
+
+    if not cleaned_files:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not process any uploaded .xlsx file.",
+        )
+
+    # ── Return single file or zip ─────────────────────────────────────────────
+    if len(cleaned_files) == 1:
+        out_name, out_bytes = cleaned_files[0]
+        return StreamingResponse(
+            io.BytesIO(out_bytes),
+            media_type=_EXCEL_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+        )
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for out_name, out_bytes in cleaned_files:
+            zf.writestr(out_name, out_bytes)
+    zip_buf.seek(0)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="cleaned_files.zip"'},
+    )
 
 
 @router.post("/combined")
