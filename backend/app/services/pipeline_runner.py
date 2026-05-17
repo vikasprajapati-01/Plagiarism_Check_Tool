@@ -217,12 +217,10 @@ async def run_pipeline(
 ) -> PipelineResult:
     """Orchestrate all detection methods and return a unified PipelineResult.
 
-    Steps:
-      1. Preprocess all input and reference texts once.
-      2. If semantic is enabled, encode all texts in a single batch forward pass.
-      3. For each text, run all enabled methods concurrently via asyncio.gather().
-      4. Combine per-method results and derive overall_risk per entry.
-      5. Build and return PipelineResult with summary statistics.
+    Preprocesses all texts once up front, then runs every enabled method
+    concurrently per entry using asyncio.gather. Semantic vectors are encoded
+    in a single batch to avoid repeated forward passes. The highest risk level
+    across all methods becomes the overall_risk for that entry.
     """
     pipeline_id = str(uuid.uuid4())
     logger.info(
@@ -481,8 +479,8 @@ async def run_full_pipeline(
                     continue
                 target_entries.append(entry)
 
-    # Throttle web/AI/license processing so large uploads don't overwhelm the executor
-    # and trigger the global WEB_SCAN_OVERALL_TIMEOUT.
+    # Cap concurrent web/AI/license tasks so we don't flood the thread pool
+    # or blow the global WEB_SCAN_OVERALL_TIMEOUT on large uploads.
     _max_concurrency = 4
     _entry_semaphore = asyncio.Semaphore(_max_concurrency)
 

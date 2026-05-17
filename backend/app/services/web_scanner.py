@@ -1,12 +1,15 @@
-"""Web plagiarism scanner using DuckDuckGo + BeautifulSoup.
+"""Web plagiarism scanner using DuckDuckGo search + BeautifulSoup page parsing.
 
-Core DuckDuckGo + BeautifulSoup pipeline preserved unchanged from
-services/web_scan.py. Fingerprinting logic from services/web_fingerprint.py
-is inlined here (that file is now deleted).
+Searches the web for each input text, fetches matched pages, and scores
+similarity using windowed Levenshtein/Jaccard/N-gram comparisons.
+Includes page fingerprinting (content hash, domain, publish date).
 
-Additions on top of original logic:
-  - retry loop with configurable WEB_SCAN_RETRIES around _search_ddg_sync
-  - configurable timeout via WEB_SCAN_TIMEOUT passed to _fetch_page_text_sync
+Key config knobs (all passed in from pipeline_runner.py via settings):
+  - retries: how many times to retry a failed DDG search
+  - timeout: per-page HTTP timeout in seconds
+  - max_queries: number of search queries generated per text
+  - max_results_per_query: URLs fetched per query
+  - max_scan_time: hard timeout on the whole scan for one text
 """
 
 import asyncio

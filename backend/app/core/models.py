@@ -53,7 +53,7 @@ class SemanticMatchResult(BaseModel):
 
 
 class AIDetectionResult(BaseModel):
-    """Result from the RoBERTa AI-content detector."""
+    """Result from the GPT-2 perplexity-based AI-content detector."""
 
     is_ai_generated: bool
     confidence: float
