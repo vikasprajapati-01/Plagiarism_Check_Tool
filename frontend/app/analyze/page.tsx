@@ -8,7 +8,7 @@ import { InputField } from "./exact/page";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLEANED_EXCEL_ENDPOINT =
-  process.env.NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT || `${API_BASE}/api/v1/reports/cleaned`;
+  process.env.NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT || `${API_BASE}/api/v1/ingest/preprocess`;
 
 type MethodsConfig = {
   exact: boolean;
@@ -32,16 +32,35 @@ type PipelineRunResult = {
   web_ai_results?: unknown[];
 };
 
+type CleanedFilePreview = {
+  filename: string;
+  total_entries: number;
+  sheets: Array<{
+    sheet_name: string;
+    headers: string[];
+    rows: string[][];
+    total_entries: number;
+  }>;
+};
+
+type CleanedPreviewPayload = {
+  total_files: number;
+  total_entries: number;
+  files: CleanedFilePreview[];
+  note?: string;
+};
+
 type PreviewState =
   | { open: false }
   | {
       open: true;
       title: string;
-      kind: "report" | "excel";
+      kind: "report" | "excel" | "cleaned";
       colorReport?: boolean;
       reportData?: PipelineRunResult | null;
       excelBlob?: Blob | null;
       excelFileName?: string;
+      cleanedData?: CleanedPreviewPayload | null;
       download: () => Promise<void>;
       downloading: boolean;
     };
@@ -116,6 +135,18 @@ async function downloadBlob(blob: Blob, fileName: string) {
   a.download = fileName;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function filenameFromResponse(res: Response, fallback: string): string {
+  const disp = res.headers.get("content-disposition") || "";
+  const match = disp.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const raw = match?.[1] || match?.[2];
+  if (!raw) return fallback;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 export default function AnalyzePage() {
@@ -286,14 +317,32 @@ export default function AnalyzePage() {
   async function openCleanedPreview() {
     if (!result) return;
 
+    if (!files.length) {
+      setError("Upload at least one file to generate the cleaned output.");
+      return;
+    }
+
     setCleanedLoading(true);
     setError(null);
 
     try {
+      const fd = new FormData();
+
+      for (const f of files) {
+        const e = extOf(f.name);
+        if (e === ".pdf") {
+          const txt = await pdfToTextFile(f);
+          fd.append("files", txt);
+        } else {
+          fd.append("files", f);
+        }
+      }
+
+      fd.append("download_format", "none");
+
       const res = await fetch(CLEANED_EXCEL_ENDPOINT, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pipeline_id: result.pipeline_id }),
+        body: fd,
       });
 
       if (!res.ok) {
@@ -305,27 +354,50 @@ export default function AnalyzePage() {
         throw new Error(msg);
       }
 
-      const blob = await res.blob();
-      const fileName = `pipeline_${result.pipeline_id.slice(0, 8)}_cleaned.xlsx`;
+      const data = (await res.json()) as CleanedPreviewPayload;
+      const fallbackName = data.total_files > 1 ? "cleaned_files.zip" : "cleaned_file.xlsx";
 
       setPreview({
         open: true,
         title: "Cleaned File Preview",
-        kind: "excel",
-        excelBlob: blob,
-        excelFileName: fileName,
+        kind: "cleaned",
+        cleanedData: data,
         reportData: null,
         downloading: false,
         download: async () => {
-          await downloadBlob(blob, fileName);
+          setPreview((prev) => (prev.open ? { ...prev, downloading: true } : prev));
+          try {
+            const dl = new FormData();
+            for (const f of files) {
+              const e = extOf(f.name);
+              if (e === ".pdf") {
+                const txt = await pdfToTextFile(f);
+                dl.append("files", txt);
+              } else {
+                dl.append("files", f);
+              }
+            }
+            dl.append("download_format", "excel");
+            const resDl = await fetch(CLEANED_EXCEL_ENDPOINT, { method: "POST", body: dl });
+            if (!resDl.ok) {
+              let msg = "Failed to download cleaned file";
+              try {
+                const d = await resDl.json();
+                msg = d?.detail || msg;
+              } catch {}
+              throw new Error(msg);
+            }
+            const blob = await resDl.blob();
+            const name = filenameFromResponse(resDl, fallbackName);
+            await downloadBlob(blob, name);
+          } finally {
+            setPreview((prev) => (prev.open ? { ...prev, downloading: false } : prev));
+          }
         },
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to generate cleaned file";
-      setError(
-        msg +
-          " (If this is a new backend endpoint, set NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT to the correct URL.)",
-      );
+      setError(msg);
     } finally {
       setCleanedLoading(false);
     }
@@ -583,6 +655,7 @@ export default function AnalyzePage() {
           reportData={preview.reportData}
           excelBlob={preview.excelBlob}
           excelFileName={preview.excelFileName}
+          cleanedData={preview.cleanedData}
           downloading={preview.downloading}
           onDownload={preview.download}
           onClose={() => setPreview({ open: false })}

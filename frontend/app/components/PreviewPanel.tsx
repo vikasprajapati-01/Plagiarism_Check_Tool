@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 
-type PreviewKind = "report" | "excel";
+type PreviewKind = "report" | "excel" | "cleaned";
 
 type ReportLike = {
   pipeline_id: string;
@@ -28,6 +28,22 @@ export type PreviewPanelProps = {
 
   excelBlob?: Blob | null;
   excelFileName?: string;
+
+  cleanedData?: {
+    total_files: number;
+    total_entries: number;
+    files: Array<{
+      filename: string;
+      total_entries: number;
+      sheets: Array<{
+        sheet_name: string;
+        headers: string[];
+        rows: string[][];
+        total_entries: number;
+      }>;
+    }>;
+    note?: string;
+  } | null;
 
   downloading?: boolean;
   onDownload: () => void | Promise<void>;
@@ -154,6 +170,7 @@ export default function PreviewPanel({
   reportData,
   excelBlob,
   excelFileName,
+  cleanedData,
   downloading = false,
   onDownload,
   onClose,
@@ -325,7 +342,7 @@ export default function PreviewPanel({
         <div style={{ padding: "18px", overflow: "auto", flex: 1 }}>
           {kind === "report" ? (
             <ReportPreview activeTab={activeTab} data={reportData} colorReport={colorReport} />
-          ) : (
+          ) : kind === "excel" ? (
             <ExcelPreview
               state={excelState}
               page={page}
@@ -333,9 +350,136 @@ export default function PreviewPanel({
               onPageChange={setPage}
               visibleRows={visibleExcelRows}
             />
+          ) : (
+            <CleanedPreview data={cleanedData} />
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CleanedPreview({
+  data,
+}: {
+  data?: {
+    total_files: number;
+    total_entries: number;
+    files: Array<{
+      filename: string;
+      total_entries: number;
+      sheets: Array<{ sheet_name: string; headers: string[]; rows: string[][]; total_entries: number }>;
+    }>;
+    note?: string;
+  } | null;
+}) {
+  if (!data || !Array.isArray(data.files) || data.files.length === 0) {
+    return (
+      <div style={{
+        background: "var(--bg-card)",
+        border: "1px solid var(--border)",
+        borderRadius: 14,
+        padding: 18,
+        color: "var(--text-secondary)",
+      }}>
+        No cleaned preview available.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div style={{
+        background: "var(--bg-card)",
+        border: "1px solid var(--border)",
+        borderRadius: 14,
+        padding: 16,
+      }}>
+        <p style={{ fontSize: 12, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+          Cleaned Summary
+        </p>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 10 }}>
+          <SummaryStat label="Files" value={String(data.total_files)} />
+          <SummaryStat label="Total Unique Rows" value={String(data.total_entries)} />
+        </div>
+        {data.note && (
+          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 10 }}>{data.note}</p>
+        )}
+      </div>
+
+      {data.files.map((file) => (
+        <div key={file.filename} style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: 14,
+          overflow: "hidden",
+        }}>
+          <div style={{ padding: 14, borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
+            <p style={{ fontSize: 13, fontWeight: 900, color: "var(--text-primary)" }}>{file.filename}</p>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+              Unique rows: {file.total_entries}
+            </p>
+          </div>
+          <div style={{ padding: 14, display: "grid", gap: 12 }}>
+            {file.sheets.map((sheet) => (
+              <div key={sheet.sheet_name} style={{
+                border: "1px solid var(--border)",
+                borderRadius: 12,
+                overflow: "hidden",
+              }}>
+                <div style={{ padding: 10, background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
+                  <p style={{ fontSize: 12, fontWeight: 800, color: "var(--text-secondary)" }}>
+                    {sheet.sheet_name} · {sheet.total_entries} rows
+                  </p>
+                </div>
+                {sheet.rows.length === 0 ? (
+                  <div style={{ padding: 12 }}>
+                    <p style={{ fontSize: 12, color: "var(--text-muted)" }}>No rows after deduplication.</p>
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          {sheet.headers.map((h) => (
+                            <th
+                              key={h}
+                              style={{
+                                textAlign: "left",
+                                padding: "8px 10px",
+                                background: "var(--bg-card)",
+                                borderBottom: "1px solid var(--border)",
+                                color: "var(--text-secondary)",
+                                fontWeight: 800,
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.rows.map((row, idx) => (
+                          <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                            {sheet.headers.map((_, colIdx) => (
+                              <td key={colIdx} style={{ padding: "8px 10px", color: "var(--text-primary)" }}>
+                                <span style={{ display: "inline-block", maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {row[colIdx] ?? ""}
+                                </span>
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
