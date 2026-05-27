@@ -8,6 +8,7 @@ Updated from api/v1/ingest.py:
 
 import io
 import logging
+import os
 import zipfile
 from typing import Annotated, List, Optional
 
@@ -35,31 +36,36 @@ _EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml
 
 async def _collect_rows_from_uploads(
     files: List[UploadFile],
-) -> tuple[List[str], List[dict]]:
-    """Read all text rows from a list of uploaded files.
+) -> tuple[List[dict], List[dict]]:
+    """Read all text entries from a list of uploaded files.
 
-    Returns (rows, file_summary) where file_summary is per-file metadata.
+    Returns (entries, file_summary) where file_summary is per-file metadata.
     """
-    all_rows: List[str] = []
+    all_entries: List[dict] = []
     file_summary: List[dict] = []
 
     for upload in files:
         contents = await upload.read()
         try:
-            rows, columns = read_all_text_from_file(upload.filename or "upload.txt", contents)
+            entries = read_all_text_from_file(upload.filename or "upload.txt", contents)
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
                 detail=f"Error reading '{upload.filename}': {exc}",
             ) from exc
-        all_rows.extend(rows)
+        rows = [e.get("text", "") for e in entries if e.get("text")]
+        columns = sorted({str(e.get("column_name")) for e in entries if e.get("column_name")})
+        if not columns:
+            columns = ["text"]
+
+        all_entries.extend(entries)
         file_summary.append({
             "filename": upload.filename,
             "columns_read": columns,
             "row_count": len(rows),
         })
 
-    return all_rows, file_summary
+    return all_entries, file_summary
 
 
 # ── Preview endpoint ──────────────────────────────────────────────────────────
@@ -77,7 +83,8 @@ async def input_data(
     file_summary: List[dict] = []
 
     if files:
-        rows, file_summary = await _collect_rows_from_uploads(files)
+        entries, file_summary = await _collect_rows_from_uploads(files)
+        rows = [e.get("text", "") for e in entries if e.get("text")]
     elif texts:
         rows = [t.strip() for t in texts.split(",") if t.strip()]
         file_summary = [{"filename": "direct_input", "columns_read": ["text"], "row_count": len(rows)}]
@@ -110,84 +117,201 @@ async def preprocess_data(
 ):
     """Normalize and clean text. Optionally download as CSV or Excel."""
     rows: List[str] = []
-    file_summary: List[dict] = []
+    files_payload: List[tuple[str, bytes]] = []
 
     if files:
-        rows, file_summary = await _collect_rows_from_uploads(files)
+        for upload in files:
+            files_payload.append((upload.filename or "upload.txt", await upload.read()))
     elif texts:
         rows = [t.strip() for t in texts.split(",") if t.strip()]
-        file_summary = [{"filename": "direct_input", "columns_read": ["text"], "row_count": len(rows)}]
+        files_payload = [("direct_input.txt", "\n".join(rows).encode("utf-8"))]
     else:
         raise HTTPException(status_code=400, detail="Provide at least one file or text input.")
 
-    if not rows:
+    if not files_payload:
         raise HTTPException(status_code=400, detail="No text found in the provided input.")
 
-    cleaned_rows = preprocess_texts(rows)
     fmt = download_format.lower()
 
-    def _make_df() -> pd.DataFrame:
-        source_labels: List[str] = []
-        for fs in file_summary:
-            source_labels.extend([fs["filename"]] * fs["row_count"])
-        return pd.DataFrame({
-            "source_file": source_labels,
-            "original_text": rows,
-            "cleaned_text": cleaned_rows,
-        })
+    def _read_file_frames(filename: str, contents: bytes) -> dict[str, pd.DataFrame]:
+        name = filename or "upload.txt"
+        lower = name.lower()
 
-    def _make_csv_bytes() -> bytes:
-        return _make_df().to_csv(index=False).encode("utf-8")
+        if lower.endswith(".txt"):
+            lines = contents.decode("utf-8", errors="replace").splitlines()
+            return {"text": pd.DataFrame({"text": [ln for ln in lines if ln.strip()]})}
 
-    def _make_excel_bytes() -> bytes:
+        if lower.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(contents))
+            return {"Sheet1": df}
+
+        if lower.endswith((".xlsx", ".xls")):
+            sheets = pd.read_excel(io.BytesIO(contents), sheet_name=None)
+            return sheets or {"Sheet1": pd.DataFrame()}
+
+        raise ValueError("Unsupported file format. Supported: CSV, XLSX, XLS, TXT")
+
+    def _cleaned_name(filename: str, ext: str) -> str:
+        base = os.path.splitext(os.path.basename(filename))[0] or "cleaned"
+        return f"{base}_cleaned{ext}"
+
+    def _row_signature(values: List[object]) -> str:
+        parts = [str(v).strip() for v in values]
+        joined = " | ".join(parts).strip()
+        return joined
+
+    def _dedupe_frames_across_files(
+        files_data: List[tuple[str, dict[str, pd.DataFrame]]]
+    ) -> dict[str, dict[str, pd.DataFrame]]:
+        seen: set[str] = set()
+        cleaned: dict[str, dict[str, pd.DataFrame]] = {}
+
+        for fname, sheets in files_data:
+            cleaned[fname] = {}
+            for sheet_name, df in sheets.items():
+                if df is None or df.empty:
+                    cleaned[fname][sheet_name] = df
+                    continue
+
+                keep_rows = []
+                for _, row in df.iterrows():
+                    sig = _row_signature(row.tolist())
+                    if not sig:
+                        continue
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    keep_rows.append(row)
+
+                if keep_rows:
+                    cleaned_df = pd.DataFrame(keep_rows, columns=df.columns)
+                else:
+                    cleaned_df = df.iloc[0:0]
+
+                cleaned[fname][sheet_name] = cleaned_df
+
+        return cleaned
+
+    def _make_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            _make_df().to_excel(writer, index=False, sheet_name="Preprocessed")
+            for sheet_name, df in sheets.items():
+                safe_name = sheet_name or "Sheet1"
+                df.to_excel(writer, index=False, sheet_name=safe_name[:31])
         return buf.getvalue()
 
-    if fmt == "csv":
-        return StreamingResponse(
-            io.BytesIO(_make_csv_bytes()),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=preprocessed_data.csv"},
-        )
+    def _make_csv_bytes(df: pd.DataFrame) -> bytes:
+        return df.to_csv(index=False).encode("utf-8")
 
-    if fmt in ("excel", "xlsx"):
-        return StreamingResponse(
-            io.BytesIO(_make_excel_bytes()),
-            media_type=_EXCEL_MEDIA_TYPE,
-            headers={"Content-Disposition": "attachment; filename=preprocessed_data.xlsx"},
-        )
+    def _make_txt_bytes(df: pd.DataFrame) -> bytes:
+        if df.empty:
+            return b""
+        col = df.columns[0] if len(df.columns) else "text"
+        return "\n".join(df[col].astype(str).tolist()).encode("utf-8")
 
-    if fmt == "both":
+    files_data: List[tuple[str, dict[str, pd.DataFrame]]] = []
+    for fname, contents in files_payload:
+        try:
+            files_data.append((fname, _read_file_frames(fname, contents)))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error reading '{fname}': {exc}",
+            ) from exc
+
+    cleaned_by_file = _dedupe_frames_across_files(files_data)
+
+    def _build_preview(files_map: dict[str, dict[str, pd.DataFrame]]) -> dict:
+        total_entries = 0
+        files_preview = []
+        for fname, sheets in files_map.items():
+            sheet_previews = []
+            file_total = 0
+            for sheet_name, df in sheets.items():
+                count = 0 if df is None else len(df.index)
+                file_total += count
+                total_entries += count
+                headers = [str(c) for c in (df.columns.tolist() if df is not None else [])]
+                rows_preview = []
+                if df is not None and not df.empty:
+                    preview_df = df.head(preview_limit).fillna("")
+                    rows_preview = preview_df.astype(str).values.tolist()
+                sheet_previews.append({
+                    "sheet_name": sheet_name or "Sheet1",
+                    "headers": headers,
+                    "rows": rows_preview,
+                    "total_entries": count,
+                })
+            files_preview.append({
+                "filename": fname,
+                "total_entries": file_total,
+                "sheets": sheet_previews,
+            })
+        return {
+            "total_entries": total_entries,
+            "files": files_preview,
+        }
+
+    if fmt != "none":
+        if len(cleaned_by_file) == 1:
+            filename = next(iter(cleaned_by_file.keys()), "cleaned")
+            sheets = cleaned_by_file[filename]
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in (".xlsx", ".xls", ".csv", ".txt"):
+                if ext in (".xlsx", ".xls"):
+                    return StreamingResponse(
+                        io.BytesIO(_make_excel_bytes(sheets)),
+                        media_type=_EXCEL_MEDIA_TYPE,
+                        headers={"Content-Disposition": f"attachment; filename={_cleaned_name(filename, '.xlsx')}"},
+                    )
+                if ext == ".csv":
+                    first_sheet = next(iter(sheets.values()), pd.DataFrame())
+                    return StreamingResponse(
+                        io.BytesIO(_make_csv_bytes(first_sheet)),
+                        media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename={_cleaned_name(filename, '.csv')}"},
+                    )
+                if ext == ".txt":
+                    first_sheet = next(iter(sheets.values()), pd.DataFrame())
+                    return StreamingResponse(
+                        io.BytesIO(_make_txt_bytes(first_sheet)),
+                        media_type="text/plain",
+                        headers={"Content-Disposition": f"attachment; filename={_cleaned_name(filename, '.txt')}"},
+                    )
+
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("preprocessed_data.csv", _make_csv_bytes())
-            zf.writestr("preprocessed_data.xlsx", _make_excel_bytes())
+            for fname, sheets in cleaned_by_file.items():
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in (".xlsx", ".xls"):
+                    zf.writestr(_cleaned_name(fname, ".xlsx"), _make_excel_bytes(sheets))
+                elif ext == ".csv":
+                    first_sheet = next(iter(sheets.values()), pd.DataFrame())
+                    zf.writestr(_cleaned_name(fname, ".csv"), _make_csv_bytes(first_sheet))
+                elif ext == ".txt":
+                    first_sheet = next(iter(sheets.values()), pd.DataFrame())
+                    zf.writestr(_cleaned_name(fname, ".txt"), _make_txt_bytes(first_sheet))
         return StreamingResponse(
             io.BytesIO(zip_buf.getvalue()),
             media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=preprocessed_data.zip"},
+            headers={"Content-Disposition": "attachment; filename=cleaned_files.zip"},
         )
 
     # Default: JSON preview
-    preview = [
-        {"original": orig, "cleaned": clean}
-        for orig, clean in list(zip(rows, cleaned_rows))[:preview_limit]
-    ]
-
+    preview_payload = _build_preview(cleaned_by_file)
+    total_entries = preview_payload["total_entries"]
+    preview_shown = sum(len(s["rows"]) for f in preview_payload["files"] for s in f["sheets"])
     return {
         "status": "ok",
-        "total_files": len(file_summary),
-        "files": file_summary,
-        "total_entries": len(rows),
-        "preview_shown": len(preview),
+        "total_files": len(preview_payload["files"]),
+        "total_entries": total_entries,
+        "preview_shown": preview_shown,
         "note": (
-            f"Showing first {preview_limit} of {len(rows)} entries. "
-            "Use download_format=csv|excel|both for the full dataset."
-            if len(rows) > preview_limit else "All entries shown."
+            f"Showing first {preview_limit} rows per sheet. "
+            "Download to get the full cleaned files."
+            if total_entries > preview_limit else "All entries shown."
         ),
-        "preview": preview,
+        "files": preview_payload["files"],
     }
 
 
