@@ -8,17 +8,19 @@ This project provides a unified plagiarism and duplicate detection pipeline for 
 
 1. [Problem Statement](#problem-statement)
 2. [System Overview](#system-overview)
-3. [Tech Stack](#tech-stack)
-4. [Repository Structure](#repository-structure)
-5. [Database Schema](#database-schema)
-6. [Data Flow](#data-flow)
-7. [Detection Methods](#detection-methods)
-8. [API Reference](#api-reference)
-9. [Pipeline Output Format](#pipeline-output-format)
-10. [Combined Report Format](#combined-report-format)
-11. [Configuration](#configuration)
-12. [How to Run Locally](#how-to-run-locally)
-13. [Key Design Decisions](#key-design-decisions)
+3. [Architecture Diagram](#architecture-diagram)
+4. [Tech Stack](#tech-stack)
+5. [Repository Structure](#repository-structure)
+6. [Database Schema](#database-schema)
+7. [Data Flow](#data-flow)
+8. [Detection Methods](#detection-methods)
+9. [API Reference](#api-reference)
+10. [Pipeline Output Format](#pipeline-output-format)
+11. [Combined Report Format](#combined-report-format)
+12. [Cleaned Report](#cleaned-report)
+13. [Configuration](#configuration)
+14. [How to Run Locally](#how-to-run-locally)
+15. [Key Design Decisions](#key-design-decisions)
 
 ## Problem Statement
 
@@ -39,6 +41,10 @@ This tool detects all of the above, produces structured reports, and ensures dat
 | Backend | Python, FastAPI | Detection services, database access, APIs |
 | Frontend | Next.js (TypeScript) | Landing page, analyzer forms, batch registration |
 | Database | PostgreSQL + pgvector (Supabase) | Reference batches, per-cell data, embeddings |
+
+## Architecture Diagram
+
+![Architecture diagram](Architecture.png)
 
 ## Tech Stack
 
@@ -72,9 +78,11 @@ This tool detects all of the above, produces structured reports, and ensures dat
 ## Frontend Notes
 
 - Pages are under `frontend/app/` using the App Router.
-- Analyze routes include: `exact`, `fuzzy`, `semantic`, `ai-detect`, `web-scan`, `license`, `cross-batch`.
+- **Primary interface**: `frontend/app/analyze/page.tsx` — unified pipeline scan page (file upload, method toggles, column selection, result preview, report download, cleaned-file download).
+- Individual method sub-pages still exist under `analyze/`: `exact`, `fuzzy`, `semantic`, `ai-detect`, `web-scan`, `license`, `cross-batch`.
 - Theme is handled by `ThemeProvider` and CSS variables in `frontend/app/globals.css`.
 - Theme toggles are in `frontend/app/components/Navbar.tsx` and `frontend/app/analyze/AnalyzerLayout.tsx`.
+- Frontend reads `NEXT_PUBLIC_API_BASE` (default: `http://localhost:8000`) and `NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT` (default: `${NEXT_PUBLIC_API_BASE}/api/v1/reports/cleaned`) from the environment.
 
 ## Repository Structure
 
@@ -89,33 +97,33 @@ backend/
 │   └── test_cross_compare.py          # cross-compare tests
 └── app/
     ├── __init__.py
-    ├── main.py                        # FastAPI entry, lifespan model loading
+    ├── main.py                        # FastAPI entry point, loads SBERT + GPT-2 at startup
     ├── core/
     │   ├── __init__.py
-    │   ├── config.py                  # pydantic-settings, all env vars
-    │   ├── models.py                  # shared Pydantic schemas
-        │   └── model_cache.py             # SBERT + GPT-2 loaded once
+    │   ├── config.py                  # all env vars via pydantic-settings
+    │   ├── models.py                  # shared Pydantic request/response schemas
+    │   └── model_cache.py             # SBERT + GPT-2 singleton loader
     ├── models/
     │   └── schemas.py                 # (empty placeholder)
     ├── api/
     │   └── v1/
-    │       ├── router.py              # includes all sub-routers
+    │       ├── router.py              # mounts all sub-routers
     │       ├── batches.py             # list/delete/rename batches
-    │       ├── ingest.py              # file upload, preprocessing, registration
-    │       ├── pipeline.py            # POST /pipeline/run
-    │       ├── reports.py             # combined report download
+    │       ├── ingest.py              # file upload, preprocessing, batch registration
+    │       ├── pipeline.py            # /columns, /run, /run-on-server
+    │       ├── reports.py             # /combined and /cleaned report endpoints
     │       └── compare.py             # cross-file row/cell comparison
     ├── services/
     │   ├── __init__.py
-        │   ├── preprocessor.py            # reads Excel/CSV/TXT (+ ZIP bundles) with cell positions
+    │   ├── preprocessor.py            # reads Excel/CSV/TXT (+ ZIP bundles), emits per-cell entries
     │   ├── exact_match.py             # SHA-256 exact duplicate detection
     │   ├── fuzzy_match.py             # Levenshtein, Jaccard, N-gram
     │   ├── semantic_match.py          # SBERT cosine similarity
-        │   ├── ai_detector.py             # GPT-2 perplexity AI detection
+    │   ├── ai_detector.py             # GPT-2 perplexity-based AI detection
     │   ├── web_scanner.py             # DuckDuckGo + BeautifulSoup web scan
     │   ├── license_detector.py        # SPDX + copyright detection
     │   ├── cross_compare.py           # cross-sheet row/cell comparison
-    │   └── pipeline_runner.py         # orchestrates pipeline execution
+    │   └── pipeline_runner.py         # orchestrates all detection methods
     └── storage/
         └── repository.py              # all DB queries via asyncpg pool
 
@@ -132,15 +140,22 @@ frontend/
 │   ├── page.tsx
 │   ├── globals.css
 │   ├── favicon.ico
+│   ├── lib/                           # (reserved for shared utilities)
+│   ├── batches/                       # (stub — batch management UI)
+│   ├── pipeline/                      # (stub — pipeline status UI)
+│   ├── reports/                       # (stub — reports UI)
 │   ├── components/
 │   │   ├── Navbar.tsx
 │   │   ├── HeroSection.tsx
 │   │   ├── AboutSection.tsx
 │   │   ├── Footer.tsx
 │   │   ├── DetectionSelector.tsx
+│   │   ├── PreviewPanel.tsx           # report & Excel preview with download
 │   │   └── ThemeProvider.tsx
 │   ├── analyze/
+│   │   ├── page.tsx                   # unified pipeline scan page (PRIMARY)
 │   │   ├── AnalyzerLayout.tsx
+│   │   ├── folder/                    # folder-upload helper route
 │   │   ├── exact/page.tsx
 │   │   ├── fuzzy/page.tsx
 │   │   ├── semantic/page.tsx
@@ -151,11 +166,11 @@ frontend/
 │   └── register/
 │       └── page.tsx
 └── public/
-        ├── file.svg
-        ├── globe.svg
-        ├── next.svg
-        ├── vercel.svg
-        └── window.svg
+    ├── file.svg
+    ├── globe.svg
+    ├── next.svg
+    ├── vercel.svg
+    └── window.svg
 ```
 
 ## Database Schema
@@ -245,11 +260,11 @@ CREATE TABLE web_ai_result (
 5. Optional: SBERT embeddings are generated and stored in `reference_embedding`.
 
 ### Pipeline Run Flow (files to results)
-1. Upload file(s) to `POST /api/v1/pipeline/run` and choose methods (ZIP bundles supported).
-2. Optional: set `comparison_scope` to `files`, `database`, or `both` (default `both`).
-3. Pipeline reads and normalizes entries.
-4. Exact/fuzzy/semantic/AI/web/license methods run in-memory against reference texts.
-5. API returns a `PipelineRunResult` JSON payload (no pipeline results are stored in the database).
+1. Upload file(s) to `POST /api/v1/pipeline/run` and pick a `target_column` (or leave as `"auto"`).
+2. Optionally call `POST /api/v1/pipeline/columns` first to see what columns are available.
+3. Pipeline reads and normalizes entries from the target column.
+4. Exact/fuzzy/semantic/AI/web/license methods run in-memory; cross-compare runs across all uploaded files.
+5. API returns a `PipelineRunResult` JSON payload (results are not stored in the database).
 
 ### Server-side Pipeline Flow (registered batches only)
 1. Call `POST /api/v1/pipeline/run-on-server` with batch IDs and selected methods.
@@ -264,7 +279,7 @@ CREATE TABLE web_ai_result (
 | Fuzzy Match | Levenshtein, Jaccard, N-gram | 0.85 default (Jaccard 0.68, N-gram 0.765) | services/fuzzy_match.py |
 | Semantic Match | SBERT cosine similarity | 0.85 | services/semantic_match.py |
 | AI Detection | GPT-2 perplexity scoring | Returns confidence 0.0–1.0 | services/ai_detector.py |
-| Web Scanner | DuckDuckGo + BeautifulSoup + windowed similarity | 0.50 similarity (default), 10s timeout, 3 retries | services/web_scanner.py |
+| Web Scanner | DuckDuckGo + BeautifulSoup + windowed similarity | 0.50 similarity (default), 10s timeout, 1 retry | services/web_scanner.py |
 | License Detector | SPDX + copyright patterns | N/A | services/license_detector.py |
 | Cross-Compare | Row/Cell comparison across Excel files | 75% (default) | services/cross_compare.py |
 | Pipeline Runner | Orchestrates selected methods | N/A | services/pipeline_runner.py |
@@ -284,7 +299,8 @@ Docs: http://localhost:8000/docs
 ### Pipeline — /api/v1/pipeline
 | Method | Path | Description |
 |---|---|---|
-| POST | /run | Unified detection run across selected methods; supports `comparison_scope`, min-word thresholds, and optional Excel download |
+| POST | /columns | Discover available column names from uploaded files (call before `/run` to pick `target_column`); auto-suggests `Query` column if found |
+| POST | /run | Unified detection run across selected methods; accepts `target_column` (or `"auto"`), `methods` JSON, `color_report` flag, and optional inline Excel download |
 | POST | /run-on-server | Run pipeline on stored batches only |
 
 ### Batches — /api/v1/batches
@@ -297,7 +313,8 @@ Docs: http://localhost:8000/docs
 ### Reports — /api/v1/reports
 | Method | Path | Description |
 |---|---|---|
-| POST | /combined | Generate multi-sheet Excel report |
+| POST | /combined | Generate 3-sheet Excel report from a pipeline result; supports `color_report` flag for colour-coded rows |
+| POST | /cleaned | Accept original `.xlsx` files + pipeline result JSON → return cleaned `.xlsx` (or `.zip` for multiple files) with duplicate/plagiarised rows removed |
 
 ### Compare — /api/v1/compare
 | Method | Path | Description |
@@ -369,30 +386,65 @@ Docs: http://localhost:8000/docs
 
 ## Combined Report Format
 
-The combined Excel report includes three sheets:
-1. Row-to-Row
-2. Cell-to-Cell
-3. AI-Plagiarism
+The combined Excel report (`POST /reports/combined`) includes three sheets:
+1. **Row-to-Row** — duplicate row pairs with similarity %
+2. **Cell-to-Cell** — duplicate cell pairs with similarity %
+3. **AI-Plagiarism** — web plagiarism + AI detection results per cell
+
+Set `color_report: true` in the request body to enable colour-coded row highlights:
+- 🔴 Red — Exact duplicates / web-plagiarised entries
+- 🟡 Yellow — Near-duplicate rows
+- 🟢 Green — Non-plagiarised entries
+- AI Detected (%) cell shading: ≥80 % → red, ≥50 % → orange, ≥20 % → yellow
+
+## Cleaned Report
+
+`POST /reports/cleaned` strips flagged rows from the original `.xlsx` file(s) and returns a sanitised workbook.
+
+**Rules applied:**
+- `row_duplicates` / `cell_duplicates` — the *duplicate* side row is deleted; the *original* row is kept.
+- `web_ai_results` — the row is deleted only when `plagiarised == "Yes"`; AI-only entries are left untouched.
+- Only `.xlsx` files are processed (CSV/TXT are ignored).
+- Row 1 (header) is **never** deleted.
+- Single file → returns `.xlsx`; multiple files → returns `.zip`.
 
 ## Configuration
 
-Create backend/.env and set:
+### Backend — `backend/.env`
 
 ```env
+# Database
 DATABASE_URL=postgresql://user:password@host:port/dbname
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# ML Models
 EMBEDDING_MODEL=all-MiniLM-L6-v2
 GPT2_MODEL=gpt2
+
+# Detection thresholds
 FUZZY_THRESHOLD=0.85
 SEMANTIC_THRESHOLD=0.85
-WEB_SCAN_TIMEOUT=10
-WEB_SCAN_RETRIES=3
-MIN_WORDS_FOR_AI=10
-MIN_WORDS_FOR_WEB=10
-MIN_WORDS_FOR_CELL_EXACT=3
+
+# Web scanner
+WEB_SCAN_TIMEOUT=10        # seconds per HTTP request
+WEB_SCAN_RETRIES=1         # retries per query
+WEB_SCAN_MAX_QUERIES=1     # DuckDuckGo queries per cell
+WEB_SCAN_MAX_RESULTS=2     # URLs fetched per query
+WEB_SCAN_MAX_SCAN_TIME=25  # max seconds per cell scan
+WEB_SCAN_OVERALL_TIMEOUT=60 # hard cap for the whole web-scan phase
+
+# Logging
 LOG_LEVEL=INFO
+```
+
+### Frontend — `frontend/.env.local`
+
+```env
+NEXT_PUBLIC_API_BASE=http://localhost:8000
+# Override only if the cleaned-file endpoint differs from the default:
+# NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT=http://localhost:8000/api/v1/reports/cleaned
 ```
 
 ## How to Run Locally
@@ -400,7 +452,7 @@ LOG_LEVEL=INFO
 ### Backend
 ```bash
 cd backend
-python -m venv .venv
+py -3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload

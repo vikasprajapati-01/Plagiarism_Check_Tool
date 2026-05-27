@@ -53,17 +53,16 @@ type CleanedPreviewPayload = {
 type PreviewState =
   | { open: false }
   | {
-      open: true;
-      title: string;
-      kind: "report" | "excel" | "cleaned";
-      colorReport?: boolean;
-      reportData?: PipelineRunResult | null;
-      excelBlob?: Blob | null;
-      excelFileName?: string;
-      cleanedData?: CleanedPreviewPayload | null;
-      download: () => Promise<void>;
-      downloading: boolean;
-    };
+    open: true;
+    title: string;
+    kind: "report" | "excel";
+    colorReport?: boolean;
+    reportData?: PipelineRunResult | null;
+    excelBlob?: Blob | null;
+    excelFileName?: string;
+    download: () => Promise<void>;
+    downloading: boolean;
+  };
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -102,9 +101,9 @@ async function pdfToTextFile(pdf: File): Promise<File> {
   try {
     if (pdfjsLib.GlobalWorkerOptions) {
       pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).toString();
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url,
+      ).toString();
     }
   } catch {
     // Best-effort; some bundlers handle workers automatically.
@@ -302,7 +301,7 @@ export default function AnalyzePage() {
             try {
               const d = await res.json();
               msg = d?.detail || msg;
-            } catch {}
+            } catch { }
             throw new Error(msg);
           }
           const blob = await res.blob();
@@ -317,8 +316,10 @@ export default function AnalyzePage() {
   async function openCleanedPreview() {
     if (!result) return;
 
-    if (!files.length) {
-      setError("Upload at least one file to generate the cleaned output.");
+    // Only .xlsx files are supported for cleaned output
+    const xlsxFiles = files.filter((f) => f.name.toLowerCase().endsWith(".xlsx"));
+    if (!xlsxFiles.length) {
+      setError("No .xlsx files found in your upload. Cleaned output only works with Excel (.xlsx) files.");
       return;
     }
 
@@ -327,18 +328,12 @@ export default function AnalyzePage() {
 
     try {
       const fd = new FormData();
-
-      for (const f of files) {
-        const e = extOf(f.name);
-        if (e === ".pdf") {
-          const txt = await pdfToTextFile(f);
-          fd.append("files", txt);
-        } else {
-          fd.append("files", f);
-        }
+      for (const f of xlsxFiles) {
+        fd.append("files", f);
       }
-
-      fd.append("download_format", "none");
+      fd.append("row_duplicates", JSON.stringify(result.row_duplicates ?? []));
+      fd.append("cell_duplicates", JSON.stringify(result.cell_duplicates ?? []));
+      fd.append("web_ai_results", JSON.stringify(result.web_ai_results ?? []));
 
       const res = await fetch(CLEANED_EXCEL_ENDPOINT, {
         method: "POST",
@@ -350,18 +345,21 @@ export default function AnalyzePage() {
         try {
           const d = await res.json();
           msg = d?.detail || msg;
-        } catch {}
+        } catch { }
         throw new Error(msg);
       }
 
-      const data = (await res.json()) as CleanedPreviewPayload;
-      const fallbackName = data.total_files > 1 ? "cleaned_files.zip" : "cleaned_file.xlsx";
+      const blob = await res.blob();
+      const isZip = res.headers.get("content-type")?.includes("zip");
+      const ext = isZip ? "zip" : "xlsx";
+      const fileName = `pipeline_${result.pipeline_id.slice(0, 8)}_cleaned.${ext}`;
 
       setPreview({
         open: true,
         title: "Cleaned File Preview",
-        kind: "cleaned",
-        cleanedData: data,
+        kind: "excel",
+        excelBlob: isZip ? null : blob,
+        excelFileName: fileName,
         reportData: null,
         downloading: false,
         download: async () => {

@@ -6,8 +6,7 @@ Implements 4 algorithms:
   3. Jaccard Similarity    — word/token overlap (paraphrasing)
   4. N-gram Similarity     — substring patterns (structural similarity)
 
-Logic preserved — identical to services/fuzzy.py.
-Thresholds now accepted as parameters (sourced from config.py by callers).
+Thresholds are passed in as parameters — they come from config.py via the pipeline.
 """
 
 import logging
