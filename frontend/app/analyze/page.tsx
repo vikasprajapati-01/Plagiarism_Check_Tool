@@ -8,7 +8,7 @@ import { InputField } from "./exact/page";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLEANED_EXCEL_ENDPOINT =
-  process.env.NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT || `${API_BASE}/api/v1/ingest/preprocess`;
+  process.env.NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT || `${API_BASE}/api/v1/reports/cleaned`;
 
 type MethodsConfig = {
   exact: boolean;
@@ -365,29 +365,7 @@ export default function AnalyzePage() {
         download: async () => {
           setPreview((prev) => (prev.open ? { ...prev, downloading: true } : prev));
           try {
-            const dl = new FormData();
-            for (const f of files) {
-              const e = extOf(f.name);
-              if (e === ".pdf") {
-                const txt = await pdfToTextFile(f);
-                dl.append("files", txt);
-              } else {
-                dl.append("files", f);
-              }
-            }
-            dl.append("download_format", "excel");
-            const resDl = await fetch(CLEANED_EXCEL_ENDPOINT, { method: "POST", body: dl });
-            if (!resDl.ok) {
-              let msg = "Failed to download cleaned file";
-              try {
-                const d = await resDl.json();
-                msg = d?.detail || msg;
-              } catch {}
-              throw new Error(msg);
-            }
-            const blob = await resDl.blob();
-            const name = filenameFromResponse(resDl, fallbackName);
-            await downloadBlob(blob, name);
+            await downloadBlob(blob, fileName);
           } finally {
             setPreview((prev) => (prev.open ? { ...prev, downloading: false } : prev));
           }
