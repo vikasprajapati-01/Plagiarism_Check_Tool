@@ -103,8 +103,6 @@ backend/
     │   ├── config.py                  # all env vars via pydantic-settings
     │   ├── models.py                  # shared Pydantic request/response schemas
     │   └── model_cache.py             # SBERT + GPT-2 singleton loader
-    ├── models/
-    │   └── schemas.py                 # (empty placeholder)
     ├── api/
     │   └── v1/
     │       ├── router.py              # mounts all sub-routers
@@ -141,9 +139,6 @@ frontend/
 │   ├── globals.css
 │   ├── favicon.ico
 │   ├── lib/                           # (reserved for shared utilities)
-│   ├── batches/                       # (stub — batch management UI)
-│   ├── pipeline/                      # (stub — pipeline status UI)
-│   ├── reports/                       # (stub — reports UI)
 │   ├── components/
 │   │   ├── Navbar.tsx
 │   │   ├── HeroSection.tsx
@@ -250,9 +245,9 @@ CREATE TABLE web_ai_result (
 
 ## Data Flow
 
-### Register Flow (Excel/CSV/TXT/ZIP to reference_text)
-1. Upload file(s) to `POST /api/v1/ingest/reference/register` (ZIP can contain CSV/XLSX/XLS/TXT files).
-2. `preprocessor.read_all_text_from_file()` reads all sheets (Excel) or CSV/TXT, and for ZIP files it recursively parses supported files inside the archive:
+### Register Flow (Excel/CSV/TXT to reference_text)
+1. Upload file(s) to `POST /api/v1/ingest/reference/register`.
+2. `preprocessor.read_all_text_from_file()` reads all sheets (Excel) or CSV/TXT:
    - Skips index-like columns (S.No, ID, etc.) and mostly numeric/empty columns.
    - Emits one entry per non-empty cell with `source_file`, `row_number`, `column_name`, and `cell_ref`.
 3. Each entry is normalized via `preprocess_text()` and hashed (SHA-256).
@@ -263,7 +258,7 @@ CREATE TABLE web_ai_result (
 1. Upload file(s) to `POST /api/v1/pipeline/run` and pick a `target_column` (or leave as `"auto"`).
 2. Optionally call `POST /api/v1/pipeline/columns` first to see what columns are available.
 3. Pipeline reads and normalizes entries from the target column.
-4. Exact/fuzzy/semantic/AI/web/license methods run in-memory; cross-compare runs across all uploaded files.
+4. Exact/fuzzy/semantic/AI/web/license methods run in-memory; cross-compare runs only for `.xlsx` files (and `.xlsx` inside ZIPs).
 5. API returns a `PipelineRunResult` JSON payload (results are not stored in the database).
 
 ### Server-side Pipeline Flow (registered batches only)
@@ -292,9 +287,9 @@ Docs: http://localhost:8000/docs
 ### Ingest — /api/v1/ingest
 | Method | Path | Description |
 |---|---|---|
-| POST | /input/data | Preview file contents (original + cleaned); CSV/XLSX/XLS/TXT/ZIP |
-| POST | /preprocess | Clean and preview text; optional CSV/Excel download; CSV/XLSX/XLS/TXT/ZIP |
-| POST | /reference/register | Register files as reference batches with cell positions; CSV/XLSX/XLS/TXT/ZIP |
+| POST | /input/data | Preview file contents (original + cleaned); CSV/XLSX/XLS/TXT |
+| POST | /preprocess | Clean and preview text; optional CSV/Excel download; CSV/XLSX/XLS/TXT |
+| POST | /reference/register | Register files as reference batches with cell positions; CSV/XLSX/XLS/TXT |
 
 ### Pipeline — /api/v1/pipeline
 | Method | Path | Description |
@@ -358,7 +353,6 @@ Docs: http://localhost:8000/docs
 {
         "pipeline_id": "a1b2c3d4-...",
         "status": "completed",
-        "comparison_scope": "both",
         "summary": {
                 "total_files": 2,
                 "total_row_duplicates": 3,
