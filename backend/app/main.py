@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.model_cache import load_models, get_sbert_model, get_gpt2_tokenizer, get_gpt2_model
+from app.core.model_cache import load_models, get_sbert_model, get_gpt2_tokenizer, get_gpt2_model, get_load_warnings
 from app.api.v1.router import api_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -36,10 +36,24 @@ async def lifespan(app: FastAPI):
     )
     # Store on app.state so any request handler can access them
     from app.core.model_cache import get_sbert_model, get_gpt2_tokenizer, get_gpt2_model
-    app.state.sbert_model    = get_sbert_model()
-    app.state.gpt2_tokenizer = get_gpt2_tokenizer()  # may be None (non-fatal)
-    app.state.gpt2_model     = get_gpt2_model()       # may be None (non-fatal)
-    logger.info("Startup complete.")
+    app.state.sbert_model    = get_sbert_model()       # may be None
+    app.state.gpt2_tokenizer = get_gpt2_tokenizer()    # may be None
+    app.state.gpt2_model     = get_gpt2_model()        # may be None
+
+    # Log which features are active
+    features = []
+    if app.state.sbert_model:
+        features.append("semantic-matching")
+    if app.state.gpt2_model:
+        features.append("ai-detection")
+    features += ["exact-match", "fuzzy-match", "cross-comparison"]  # always available
+
+    logger.info("Startup complete. Active features: %s", ", ".join(features))
+    if not app.state.sbert_model or not app.state.gpt2_model:
+        logger.warning(
+            "Some ML models failed to load. Run `python scripts/download_models.py` "
+            "to cache models locally for offline use."
+        )
 
     yield  # ── application is running ───────────────────────────────────────
 
@@ -70,8 +84,17 @@ app.add_middleware(
 
 @app.get("/", tags=["Health"])
 async def root():
-    """Health-check endpoint."""
-    return {"message": "Plagiarism Checker Backend Running", "version": "2.0.0"}
+    """Health-check endpoint — shows model status and any warnings."""
+    warnings = get_load_warnings()
+    return {
+        "message": "Plagiarism Checker Backend Running",
+        "version": "2.0.0",
+        "models": {
+            "sbert": "loaded" if app.state.sbert_model else "unavailable",
+            "gpt2": "loaded" if app.state.gpt2_model else "unavailable",
+        },
+        "warnings": warnings if warnings else None,
+    }
 
 
 # Mount the single unified router under /api/v1
