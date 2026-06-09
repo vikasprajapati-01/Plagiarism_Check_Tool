@@ -55,10 +55,11 @@ type PreviewState =
   | {
     open: true;
     title: string;
-    kind: "report" | "excel";
+    kind: "report" | "excel" | "cleaned";
     colorReport?: boolean;
     reportData?: PipelineRunResult | null;
     excelBlob?: Blob | null;
+    cleanedData?: any;
     excelFileName?: string;
     download: () => Promise<void>;
     downloading: boolean;
