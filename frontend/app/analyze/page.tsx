@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import AnalyzerLayout from "./AnalyzerLayout";
 import PreviewPanel from "../components/PreviewPanel";
@@ -83,50 +83,9 @@ function extOf(name: string): string {
 }
 
 function isAllowedInputExt(ext: string): boolean {
-  return [".xlsx", ".xls", ".csv", ".txt", ".pdf"].includes(ext);
+  return [".xlsx", ".xls", ".csv"].includes(ext);
 }
 
-async function pdfToTextFile(pdf: File): Promise<File> {
-  const pdfjsLib = (await import("pdfjs-dist")) as unknown as {
-    GlobalWorkerOptions?: { workerSrc: string };
-    getDocument: (src: { data: ArrayBuffer }) => {
-      promise: Promise<{
-        numPages: number;
-        getPage: (pageNumber: number) => Promise<{
-          getTextContent: () => Promise<{ items?: Array<{ str?: unknown }> }>;
-        }>;
-      }>;
-    };
-  };
-  // Ensure worker is configured; pdfjs supports bundlers via URL worker.
-  try {
-    if (pdfjsLib.GlobalWorkerOptions) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-        "pdfjs-dist/build/pdf.worker.min.mjs",
-        import.meta.url,
-      ).toString();
-    }
-  } catch {
-    // Best-effort; some bundlers handle workers automatically.
-  }
-
-  const ab = await pdf.arrayBuffer();
-  const doc = await pdfjsLib.getDocument({ data: ab }).promise;
-
-  let text = "";
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    const strings = (content.items || [])
-      .map((it) => (typeof it?.str === "string" ? it.str : ""))
-      .filter(Boolean);
-    text += strings.join(" ") + "\n";
-  }
-
-  const blob = new Blob([text], { type: "text/plain" });
-  const base = pdf.name.replace(/\.pdf$/i, "");
-  return new File([blob], `${base}.txt`, { type: "text/plain" });
-}
 
 async function downloadBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
@@ -153,6 +112,8 @@ export default function AnalyzePage() {
   const [files, setFiles] = useState<File[]>([]);
   const [dragActive, setDragActive] = useState(false);
 
+
+
   const [webScan, setWebScan] = useState(true);
   const [aiDetection, setAiDetection] = useState(true);
   const [coloredReport, setColoredReport] = useState(false);
@@ -170,9 +131,11 @@ export default function AnalyzePage() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const supportedHint = ".xlsx, .csv, .pdf, .txt";
+  const supportedHint = ".xlsx, .xls, .csv";
 
   const totalSize = useMemo(() => files.reduce((acc, f) => acc + (f.size || 0), 0), [files]);
+
+
 
   function addFiles(incoming: FileList | File[]) {
     const list = Array.from(incoming);
@@ -212,6 +175,8 @@ export default function AnalyzePage() {
       return;
     }
 
+
+
     setLoading(true);
     setError(null);
     setResult(null);
@@ -228,19 +193,15 @@ export default function AnalyzePage() {
 
       const fd = new FormData();
 
-      // Convert PDFs to TXT on the client so the backend can process them.
       for (const f of files) {
-        const e = extOf(f.name);
-        if (e === ".pdf") {
-          const txt = await pdfToTextFile(f);
-          fd.append("files", txt);
-        } else {
-          fd.append("files", f);
-        }
+        fd.append("files", f);
       }
 
       fd.append("methods", JSON.stringify(methods));
+
+      fd.append("detection_mode", "row");
       fd.append("target_column", targetColumn.trim() ? targetColumn.trim() : "auto");
+
       fd.append("download_report", "false");
       fd.append("report_format", "excel");
       fd.append("color_report", coloredReport ? "true" : "false");
@@ -393,6 +354,7 @@ export default function AnalyzePage() {
           void runPipeline();
         }}
       >
+
         {/* Upload */}
         <Section title="File & Folder Input">
           <div
@@ -453,7 +415,7 @@ export default function AnalyzePage() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".xlsx,.xls,.csv,.txt,.pdf"
+              accept=".xlsx,.xls,.csv"
               style={{ display: "none" }}
               onChange={(e) => {
                 if (e.target.files) addFiles(e.target.files);
@@ -542,8 +504,8 @@ export default function AnalyzePage() {
           </div>
         </Section>
 
-        {/* Column */}
-        <Section title="Column Specification">
+        {/* Column Specification */}
+        <Section title="Query Column">
           <InputField
             label="Query Column"
             value={targetColumn}
@@ -551,7 +513,7 @@ export default function AnalyzePage() {
             placeholder="Auto (recommended)"
           />
           <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-            Use this if your file doesn’t have a default query column. Leave blank for auto-detect.
+            Use this if your file doesn&apos;t have a default query column. Leave blank for auto-detect.
           </p>
         </Section>
 

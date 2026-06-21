@@ -1,7 +1,7 @@
 """
 Application settings loaded from environment variables / .env file.
 
-All thresholds, model names, and DB credentials live here.
+All thresholds and model names live here.
 Service files must import from this module — never hardcode values.
 """
 
@@ -16,12 +16,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-    # ── Database ──────────────────────────────────────────────────────────────
-    DATABASE_URL: str = ""
-    SUPABASE_URL: str = ""
-    SUPABASE_ANON_KEY: str = ""
-    SUPABASE_SERVICE_ROLE_KEY: str = ""
 
     # ── ML Models ─────────────────────────────────────────────────────────────
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"

@@ -1,7 +1,4 @@
-"""Text normalisation and file-reading utilities for ingestion and detection pipelines.
-
-Logic preserved — identical to services/preprocess.py.
-"""
+"""Text normalisation and file-reading utilities for ingestion and detection pipelines."""
 
 import hashlib
 import io
@@ -54,7 +51,7 @@ def read_all_text_from_file(
     filename: str,
     contents: bytes,
 ) -> List[Dict[str, object]]:
-    """Read text values from CSV/XLSX/XLS/TXT with per-cell position metadata."""
+    """Read text values from CSV/XLSX/XLS with per-cell position metadata."""
 
     def _column_letter(col_index: int) -> str:
         letters = ""
@@ -71,28 +68,6 @@ def read_all_text_from_file(
     source_file = os.path.basename(filename)
     filename_lower = filename.lower()
 
-
-    if filename_lower.endswith(".txt"):
-        lines = contents.decode("utf-8", errors="replace").splitlines()
-        entries: List[Dict[str, object]] = []
-        for idx, line in enumerate(lines, start=1):
-            raw_text = line.strip()
-            if not raw_text:
-                continue
-            cleaned_text = preprocess_text(raw_text)
-            entries.append(
-                {
-                    "text": raw_text,
-                    "cleaned_text": cleaned_text,
-                    "sha256": _sha256(cleaned_text),
-                    "source_file": source_file,
-                    "row_number": idx,
-                    "column_name": "text",
-                    "cell_ref": f"A{idx}",
-                }
-            )
-        return entries
-
     if filename_lower.endswith(".csv"):
         sheets = {"": pd.read_csv(io.BytesIO(contents))}
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
@@ -102,7 +77,7 @@ def read_all_text_from_file(
         if not sheets:
             sheets = {"": pd.DataFrame()}
     else:
-        raise ValueError("Unsupported file format. Supported: CSV, XLSX, XLS, TXT")
+        raise ValueError("Unsupported file format. Supported: CSV, XLSX, XLS")
 
     skip_names = {
         "s.no",

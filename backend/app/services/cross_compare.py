@@ -270,6 +270,118 @@ def compare_cells(cells, threshold=75.0):
     return matches
 
 
+def compare_columns_within_rows(
+    file_name: str,
+    contents: bytes,
+    target_columns: List[str],
+    threshold: float = 75.0,
+) -> List[MatchPair]:
+    """Compare specified columns against each other WITHIN the same row.
+
+    For every row in the file, compares every pair of target_columns using
+    the same exact + fuzzy logic as compare_cells().  No cross-row comparison
+    is performed — this is purely horizontal (within-row) detection.
+
+    Args:
+        file_name: Display name used in labels (e.g. ``"dataset.xlsx"``).
+        contents:  Raw bytes of the XLSX file.
+        target_columns: Two or more column header names to compare pairwise.
+        threshold: Minimum fuzzy similarity (0–100) to flag as Near-duplicate.
+
+    Returns:
+        A list of MatchPair objects sorted by similarity descending,
+        using ``level="Cell"`` so they slot into the Cell-to-Cell sheet.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    # ── Step 1: read header → column-index mapping for each sheet ────────────
+    wb = load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+    # sheet_header_map: { sheet_name → { col_name_lower → col_idx (1-based) } }
+    sheet_header_map: Dict[str, Dict[str, int]] = {}
+    for sname in wb.sheetnames:
+        ws = wb[sname]
+        first_row = next(ws.iter_rows(max_row=1, values_only=True), None)
+        if first_row is None:
+            sheet_header_map[sname] = {}
+            continue
+        hmap: Dict[str, int] = {}
+        for ci, val in enumerate(first_row, 1):
+            if val is not None:
+                hmap[str(val).strip().lower()] = ci
+        sheet_header_map[sname] = hmap
+    wb.close()
+
+    target_lower = [c.strip().lower() for c in target_columns]
+
+    # ── Step 2: parse all cells (no column filter) ───────────────────────────
+    _, all_cells = parse_excel_file(file_name, contents, target_column=None, filter_to_target=False)
+
+    # Build lookup: (sheet_name, row_idx, col_idx) → CellRef
+    cell_lookup: Dict[Tuple[str, int, int], CellRef] = {}
+    for cr in all_cells:
+        cell_lookup[(cr.sheet_name, cr.row, cr.col)] = cr
+
+    # ── Step 3: collect unique (sheet_name, row_idx) pairs ──────────────────
+    seen_rows: Set[Tuple[str, int]] = set()
+    for cr in all_cells:
+        seen_rows.add((cr.sheet_name, cr.row))
+
+    # ── Step 4: for each row, compare every pair of target columns ───────────
+    matches: List[MatchPair] = []
+
+    for (sname, row_idx) in sorted(seen_rows):
+        hmap = sheet_header_map.get(sname, {})
+
+        # Resolve col indices for the requested column names in this sheet
+        col_indices: List[Optional[int]] = []
+        for col_lower in target_lower:
+            col_indices.append(hmap.get(col_lower))
+
+        # Need at least 2 resolved columns to form any pair
+        resolved = [(target_columns[i], col_indices[i])
+                    for i in range(len(target_lower))
+                    if col_indices[i] is not None]
+        if len(resolved) < 2:
+            continue
+
+        # Compare every pair (combinations — no duplicates, A-vs-B only once)
+        for (name_a, cidx_a), (name_b, cidx_b) in combinations(resolved, 2):
+            ref_a = cell_lookup.get((sname, row_idx, cidx_a))
+            ref_b = cell_lookup.get((sname, row_idx, cidx_b))
+
+            if ref_a is None or ref_b is None:
+                continue
+            if len(ref_a.cleaned_value) < 3 or len(ref_b.cleaned_value) < 3:
+                continue
+
+            if ref_a.cleaned_value == ref_b.cleaned_value:
+                matches.append(_make_match(
+                    ref_a.label, ref_b.label,
+                    ref_a.raw_value, ref_b.raw_value,
+                    "Exact", 100.0, "Cell",
+                    sname, row_idx, cidx_a,
+                    sname, row_idx, cidx_b,
+                ))
+            else:
+                sim = levenshtein_similarity(ref_a.cleaned_value, ref_b.cleaned_value) * 100
+                if sim >= threshold:
+                    matches.append(_make_match(
+                        ref_a.label, ref_b.label,
+                        ref_a.raw_value, ref_b.raw_value,
+                        "Near", round(sim, 1), "Cell",
+                        sname, row_idx, cidx_a,
+                        sname, row_idx, cidx_b,
+                    ))
+
+    matches.sort(key=lambda m: m.similarity, reverse=True)
+    _log.info(
+        "compare_columns_within_rows: %d rows checked, %d pairs flagged (threshold=%.1f)",
+        len(seen_rows), len(matches), threshold,
+    )
+    return matches
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_cross_comparison(files, threshold=75.0, do_row_compare=True,

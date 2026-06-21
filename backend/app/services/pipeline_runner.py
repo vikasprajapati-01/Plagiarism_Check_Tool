@@ -1,348 +1,28 @@
 """Unified detection pipeline orchestrator.
 
 Runs all enabled detection methods concurrently for each input text and
-combines their results into a single PipelineResult.
-
-Risk hierarchy: none < low < medium < high
-Overall risk per entry = highest risk across all enabled methods.
+combines their results into a single PipelineRunResult.
 """
 
 import asyncio
-import io
 import logging
 import uuid
-import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.core.models import (
-    AIDetectionResult,
     DuplicatePairResult,
-    EntryMethodResults,
-    EntryResult,
-    ExactMatchResult,
-    FuzzyMatchResult,
-    LicenseDetectionResult,
     MethodsConfig,
-    PipelineResult,
     PipelineRunResult,
-    PipelineSummary,
-    RiskBreakdown,
-    SemanticMatchResult,
     WebAiEntryResult,
-    WebScanMatchItem,
-    WebScanResult,
 )
 from app.services.ai_detector import detect_ai_content
-from app.services.cross_compare import run_cross_comparison
-from app.services.exact_match import sha256_hash
-from app.services.fuzzy_match import is_fuzzy_duplicate
+from app.services.cross_compare import compare_columns_within_rows, run_cross_comparison
 from app.services.license_detector import detect_license
-from app.services.preprocessor import preprocess_text, read_all_text_from_file
-from app.services.semantic_match import cosine_similarity
+from app.services.preprocessor import read_all_text_from_file
 from app.services.web_scanner import scan_text_online
 
 logger = logging.getLogger(__name__)
-
-# Risk ordering for comparison
-_RISK_ORDER: Dict[str, int] = {"none": 0, "low": 1, "medium": 2, "high": 3}
-
-
-def _higher_risk(a: str, b: str) -> str:
-    """Return the higher of two risk level strings."""
-    return a if _RISK_ORDER.get(a, 0) >= _RISK_ORDER.get(b, 0) else b
-
-
-def _ai_risk(confidence: float, is_ai: bool) -> str:
-    """Map AI detection confidence to a risk level."""
-    if not is_ai:
-        return "none"
-    if confidence >= 0.90:
-        return "high"
-    if confidence >= 0.75:
-        return "medium"
-    return "low"
-
-
-def _semantic_risk(similarity: Optional[float], is_dup: bool) -> str:
-    """Map semantic similarity score to a risk level."""
-    if not is_dup or similarity is None:
-        return "none"
-    if similarity >= 0.95:
-        return "high"
-    if similarity >= 0.85:
-        return "medium"
-    return "low"
-
-
-def _fuzzy_risk(scores: dict, is_dup: bool) -> str:
-    """Map fuzzy scores to a risk level."""
-    if not is_dup:
-        return "none"
-    best = max(scores.values()) if scores else 0.0
-    if best >= 0.95:
-        return "high"
-    if best >= 0.85:
-        return "medium"
-    return "low"
-
-
-async def _run_exact(
-    text: str,
-    preprocessed: str,
-    reference_texts: List[str],
-) -> ExactMatchResult:
-    """Check for exact (SHA-256) duplicate against reference_texts."""
-    text_hash = sha256_hash(preprocessed)
-    ref_map = {sha256_hash(preprocess_text(r)): r for r in reference_texts}
-    matched = ref_map.get(text_hash)
-    return ExactMatchResult(
-        is_duplicate=matched is not None,
-        matched_text=matched,
-    )
-
-
-async def _run_fuzzy(
-    text: str,
-    reference_texts: List[str],
-    threshold: float,
-) -> FuzzyMatchResult:
-    """Find the best fuzzy match in reference_texts."""
-    is_dup, matched, scores = await is_fuzzy_duplicate(text, reference_texts, threshold)
-    return FuzzyMatchResult(
-        is_duplicate=is_dup,
-        scores=scores or {},
-        matched_text=matched,
-    )
-
-
-async def _run_semantic(
-    idx: int,
-    input_vecs: List[List[float]],
-    reference_texts: List[str],
-    ref_vecs: List[List[float]],
-    threshold: float,
-) -> SemanticMatchResult:
-    """Find the best semantic match for one input text."""
-    if not ref_vecs:
-        return SemanticMatchResult(is_duplicate=False)
-
-    query_vec = input_vecs[idx]
-    best_score = -1.0
-    best_match: Optional[str] = None
-
-    for j, ref_vec in enumerate(ref_vecs):
-        score = cosine_similarity(query_vec, ref_vec)
-        if score > best_score:
-            best_score = score
-            best_match = reference_texts[j]
-
-    is_dup = best_score >= threshold
-    return SemanticMatchResult(
-        is_duplicate=is_dup,
-        similarity=round(best_score, 4) if best_score >= 0 else None,
-        matched_text=best_match if is_dup else None,
-    )
-
-
-async def _run_ai(
-    text: str,
-    gpt2_tokenizer: Any,
-    gpt2_model: Any,
-) -> AIDetectionResult:
-    """Run GPT-2 perplexity AI-content detection on one text."""
-    result = await detect_ai_content(text, gpt2_tokenizer, gpt2_model)
-    return AIDetectionResult(
-        is_ai_generated=result["label"] == "AI",
-        confidence=result["confidence"],
-        label=result["label"],
-    )
-
-
-async def _run_web(text: str, timeout: int, retries: int) -> WebScanResult:
-    """Scan the web for plagiarism of one text."""
-    raw = await scan_text_online(text, timeout=timeout, retries=retries)
-    sources = [
-        WebScanMatchItem(
-            url=m.url,
-            title=m.title,
-            snippet=m.snippet,
-            page_excerpt=m.page_excerpt,
-            similarity_scores=m.similarity_scores,
-            best_score=m.best_score,
-            fingerprint=m.fingerprint,
-        )
-        for m in raw.matches
-    ]
-    return WebScanResult(
-        found_online=raw.is_plagiarism,
-        sources=sources,
-        error=raw.error,
-    )
-
-
-async def _run_license(text: str) -> LicenseDetectionResult:
-    """Run license/copyright detection on one text."""
-    raw = await detect_license(text)
-    licenses = [
-        {
-            "license_name": m.license_name,
-            "spdx_id": m.spdx_id,
-            "confidence": m.confidence,
-            "license_url": m.license_url,
-            "snippet": m.snippet,
-        }
-        for m in raw.licenses_detected
-    ]
-    return LicenseDetectionResult(
-        has_license=raw.has_license,
-        licenses=licenses,
-        risk_level=raw.risk_level,
-    )
-
-
-# ── Main pipeline entry point ─────────────────────────────────────────────────
-
-async def run_pipeline(
-    texts: List[str],
-    methods_config: MethodsConfig,
-    reference_texts: List[str],
-    sbert_model: Any,
-    gpt2_tokenizer: Optional[Any],
-    gpt2_model: Optional[Any],
-    fuzzy_threshold: float = 0.85,
-    semantic_threshold: float = 0.85,
-    web_scan_timeout: int = 10,
-    web_scan_retries: int = 3,
-) -> PipelineResult:
-    """Orchestrate all detection methods and return a unified PipelineResult.
-
-    Preprocesses all texts once up front, then runs every enabled method
-    concurrently per entry using asyncio.gather. Semantic vectors are encoded
-    in a single batch to avoid repeated forward passes. The highest risk level
-    across all methods becomes the overall_risk for that entry.
-    """
-    pipeline_id = str(uuid.uuid4())
-    logger.info(
-        "Pipeline %s started: %d texts, methods=%s",
-        pipeline_id, len(texts), methods_config.model_dump(),
-    )
-
-    # Step 1: Preprocess
-    preprocessed_inputs = [preprocess_text(t) for t in texts]
-    preprocessed_refs = [preprocess_text(r) for r in reference_texts]
-
-    # Step 2: Encode all texts in one batch (avoids N separate forward passes)
-    input_vecs: List[List[float]] = []
-    ref_vecs: List[List[float]] = []
-
-    if methods_config.semantic and sbert_model is not None:
-        loop = asyncio.get_running_loop()
-        all_texts = preprocessed_inputs + preprocessed_refs
-        if all_texts:
-            from app.services.semantic_match import encode_texts as _encode
-            from functools import partial
-            all_vecs = await loop.run_in_executor(
-                None, partial(_encode, all_texts, sbert_model, False)
-            )
-            input_vecs = all_vecs[: len(texts)]
-            ref_vecs = all_vecs[len(texts):]
-
-    # Step 3 & 4: Per-entry processing
-    entry_results: List[EntryResult] = []
-
-    for idx, (raw_text, preprocessed) in enumerate(zip(texts, preprocessed_inputs)):
-        tasks = {}
-
-        if methods_config.exact:
-            tasks["exact"] = _run_exact(raw_text, preprocessed, reference_texts)
-        if methods_config.fuzzy:
-            tasks["fuzzy"] = _run_fuzzy(raw_text, reference_texts, fuzzy_threshold)
-        if methods_config.semantic and input_vecs:
-            tasks["semantic"] = _run_semantic(idx, input_vecs, reference_texts, ref_vecs, semantic_threshold)
-        if methods_config.ai_detection and gpt2_model is not None:
-            tasks["ai_detection"] = _run_ai(raw_text, gpt2_tokenizer, gpt2_model)
-        if methods_config.web_scan:
-            tasks["web_scan"] = _run_web(raw_text, web_scan_timeout, web_scan_retries)
-        if methods_config.license_check:
-            tasks["license_check"] = _run_license(raw_text)
-
-        # Run all enabled methods concurrently
-        keys = list(tasks.keys())
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        method_results: Dict[str, Any] = {}
-        for key, result in zip(keys, results):
-            if isinstance(result, Exception):
-                logger.warning("Method %s failed for entry %d: %s", key, idx, result)
-            else:
-                method_results[key] = result
-
-        # Derive overall_risk
-        overall_risk = "none"
-
-        if "exact" in method_results:
-            r: ExactMatchResult = method_results["exact"]
-            if r.is_duplicate:
-                overall_risk = _higher_risk(overall_risk, "high")
-
-        if "fuzzy" in method_results:
-            r2: FuzzyMatchResult = method_results["fuzzy"]
-            overall_risk = _higher_risk(overall_risk, _fuzzy_risk(r2.scores, r2.is_duplicate))
-
-        if "semantic" in method_results:
-            r3: SemanticMatchResult = method_results["semantic"]
-            overall_risk = _higher_risk(overall_risk, _semantic_risk(r3.similarity, r3.is_duplicate))
-
-        if "ai_detection" in method_results:
-            r4: AIDetectionResult = method_results["ai_detection"]
-            overall_risk = _higher_risk(overall_risk, _ai_risk(r4.confidence, r4.is_ai_generated))
-
-        if "web_scan" in method_results:
-            r5: WebScanResult = method_results["web_scan"]
-            if r5.found_online:
-                overall_risk = _higher_risk(overall_risk, "medium")
-
-        if "license_check" in method_results:
-            r6: LicenseDetectionResult = method_results["license_check"]
-            overall_risk = _higher_risk(overall_risk, r6.risk_level)
-
-        entry_results.append(EntryResult(
-            entry_id=idx + 1,
-            original_text=raw_text,
-            overall_risk=overall_risk,
-            methods=EntryMethodResults(
-                exact=method_results.get("exact"),
-                fuzzy=method_results.get("fuzzy"),
-                semantic=method_results.get("semantic"),
-                ai_detection=method_results.get("ai_detection"),
-                web_scan=method_results.get("web_scan"),
-                license_check=method_results.get("license_check"),
-            ),
-        ))
-
-    # Step 5: Build summary
-    flagged = sum(1 for e in entry_results if e.overall_risk != "none")
-    breakdown = RiskBreakdown(
-        high=sum(1 for e in entry_results if e.overall_risk == "high"),
-        medium=sum(1 for e in entry_results if e.overall_risk == "medium"),
-        low=sum(1 for e in entry_results if e.overall_risk == "low"),
-        none=sum(1 for e in entry_results if e.overall_risk == "none"),
-    )
-
-    logger.info(
-        "Pipeline %s completed: %d entries, %d flagged", pipeline_id, len(texts), flagged
-    )
-
-    return PipelineResult(
-        pipeline_id=pipeline_id,
-        status="completed",
-        summary=PipelineSummary(
-            total_entries=len(texts),
-            flagged=flagged,
-            risk_breakdown=breakdown,
-        ),
-        results=entry_results,
-    )
 
 
 async def run_full_pipeline(
@@ -357,6 +37,8 @@ async def run_full_pipeline(
     semantic_threshold: float = 0.85,
     web_scan_timeout: int = 10,
     web_scan_retries: int = 3,
+    detection_mode: str = "row",
+    target_columns: Optional[List[str]] = None,
 ) -> PipelineRunResult:
     pipeline_id = str(uuid.uuid4())
     row_duplicates: List[DuplicatePairResult] = []
@@ -367,9 +49,9 @@ async def run_full_pipeline(
         return max(0.0, min(100.0, value))
 
     def _ai_probability(ai_payload: Optional[dict]) -> float:
-        """Extract AI probability from the new GPT-2 detector payload.
+        """Extract AI probability from the GPT-2 detector payload.
 
-        The payload now includes 'ai_pct' (0–100) directly. Falls back to
+        The payload includes 'ai_pct' (0–100) directly. Falls back to
         the label/confidence approach for backwards compatibility.
         """
         if not ai_payload:
@@ -393,22 +75,6 @@ async def run_full_pipeline(
             return max(0.0, min(1.0, 1.0 - confidence))
         return 0.0
 
-    def _extract_xlsx_from_zip(filename: str, contents: bytes) -> List[Tuple[str, bytes]]:
-        if not filename.lower().endswith(".zip"):
-            return []
-        extracted: List[Tuple[str, bytes]] = []
-        try:
-            with zipfile.ZipFile(io.BytesIO(contents)) as zf:
-                for zip_info in zf.infolist():
-                    if zip_info.is_dir():
-                        continue
-                    inner_name = zip_info.filename
-                    if inner_name.lower().endswith(".xlsx"):
-                        extracted.append((inner_name, zf.read(zip_info)))
-        except Exception as exc:
-            logger.warning("Failed to extract XLSX from %s: %s", filename, exc)
-        return extracted
-
     entries_by_file: Dict[str, List[Dict[str, object]]] = {}
     all_entries: List[Dict[str, object]] = []
 
@@ -421,30 +87,52 @@ async def run_full_pipeline(
             logger.warning("Failed to read file %s: %s", filename, exc)
             entries_by_file[filename] = []
 
+    _target_columns: List[str] = list(target_columns) if target_columns else []
+
     try:
         loop = asyncio.get_running_loop()
         from functools import partial
 
-        compare_files: List[Tuple[str, bytes]] = []
-        for fname, fbytes in files:
-            if fname.lower().endswith(".xlsx"):
-                compare_files.append((fname, fbytes))
-            elif fname.lower().endswith(".zip"):
-                compare_files.extend(_extract_xlsx_from_zip(fname, fbytes))
+        # Only XLSX files are used for cross-comparison (openpyxl requirement)
+        compare_files: List[Tuple[str, bytes]] = [
+            (fname, fbytes)
+            for fname, fbytes in files
+            if fname.lower().endswith((".xlsx", ".xls"))
+        ]
 
         row_matches, cell_matches = [], []
-        if compare_files:
-            row_matches, cell_matches = await loop.run_in_executor(
-                None,
-                partial(
-                    run_cross_comparison,
-                    compare_files,
-                    threshold,
-                    do_row_compare=methods_config.exact or methods_config.fuzzy,
-                    do_cell_compare=methods_config.exact or methods_config.fuzzy,
-                    target_column=target_column,
-                ),
-            )
+
+        if detection_mode == "column":
+            # Column-wise: compare specified columns within each row (no cross-row).
+            # row_duplicates stays empty; cell_duplicates is populated.
+            if compare_files and (methods_config.exact or methods_config.fuzzy):
+                fname_cw, fbytes_cw = compare_files[0]
+                col_matches = await loop.run_in_executor(
+                    None,
+                    partial(
+                        compare_columns_within_rows,
+                        fname_cw,
+                        fbytes_cw,
+                        _target_columns,
+                        threshold,
+                    ),
+                )
+                cell_matches = col_matches
+            # row_matches stays []
+        else:
+            # Row-wise (default): existing unchanged behaviour.
+            if compare_files:
+                row_matches, cell_matches = await loop.run_in_executor(
+                    None,
+                    partial(
+                        run_cross_comparison,
+                        compare_files,
+                        threshold,
+                        do_row_compare=methods_config.exact or methods_config.fuzzy,
+                        do_cell_compare=methods_config.exact or methods_config.fuzzy,
+                        target_column=target_column,
+                    ),
+                )
 
         row_duplicates = [
             DuplicatePairResult(
@@ -469,10 +157,17 @@ async def run_full_pipeline(
 
     target_entries = []
     if methods_config.web_scan or methods_config.ai_detection or methods_config.license_check:
+        # In column-wise mode filter by any of the target_columns;
+        # in row-wise mode filter by the single target_column.
+        if detection_mode == "column":
+            _target_cols_lower: set = {c.strip().lower() for c in _target_columns}
+        else:
+            _target_cols_lower = {target_column.strip().lower()}
+
         for entries in entries_by_file.values():
             for entry in entries:
                 col = entry.get("column_name", "").strip().lower()
-                if col != target_column.strip().lower():
+                if col not in _target_cols_lower:
                     continue
                 raw_text = entry.get("text", "")
                 if not raw_text or not raw_text.strip():

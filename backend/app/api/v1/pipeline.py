@@ -1,7 +1,7 @@
 """Pipeline trigger endpoints.
 
-POST /run            — accepts uploaded files, runs the full detection pipeline.
-POST /run-on-server  — runs the pipeline on already-registered server-side batches.
+POST /columns  — return column names found across all uploaded Excel/CSV files.
+POST /run      — accepts uploaded files, runs the full detection pipeline.
 """
 
 import io
@@ -14,10 +14,9 @@ import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.core.models import MethodsConfig, PipelineResult, PipelineRunResult, ServerPipelineRequest
+from app.core.models import MethodsConfig, PipelineRunResult
 from app.core.config import settings
-from app.services.pipeline_runner import run_full_pipeline, run_pipeline
-from app.storage.repository import async_fetch_all_texts_by_batch
+from app.services.pipeline_runner import run_full_pipeline
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,7 +43,7 @@ def _get_models(request: Request):
 async def get_pipeline_columns(
     files: Annotated[
         List[UploadFile],
-        File(description="One or more Excel/CSV/TXT files to inspect."),
+        File(description="One or more Excel or CSV files to inspect."),
     ] = [],
 ):
     """Return all column names found across all uploaded files.
@@ -62,14 +61,14 @@ async def get_pipeline_columns(
     for upload in files:
         contents = await upload.read()
         if upload.filename and upload.filename.lower().endswith(
-            (".xlsx", ".xls", ".csv", ".txt")
+            (".xlsx", ".xls", ".csv")
         ):
             parsed_files.append((upload.filename, contents))
 
     if not parsed_files:
         raise HTTPException(
             status_code=400,
-            detail="No supported files found. Upload .xlsx, .xls, .csv, or .txt files.",
+            detail="No supported files found. Upload .xlsx, .xls, or .csv files.",
         )
 
     try:
@@ -116,23 +115,25 @@ async def run_pipeline_endpoint(
     request: Request,
     files: Annotated[
         List[UploadFile],
-        File(description="One or more CSV / XLSX / TXT files."),
+        File(description="One or more Excel or CSV files."),
     ] = [],
-    reference_batch_ids: Optional[str] = Form(None),  # JSON array string
     methods: Optional[str] = Form(None),               # JSON object string
     target_column: str = Form(""),
     download_report: bool = Form(False),
     report_format: str = Form("excel"),
     color_report: bool = Form(False),
+    detection_mode: str = Form("row"),       # "row" | "column"
+    target_columns: str = Form(""),          # comma-separated, used only in column mode
 ):
-    """Run the full detection pipeline on uploaded files.
+    """Run the full detection pipeline on uploaded Excel/CSV files.
 
-    - files: one or more Excel/CSV/TXT files to check.
-    - reference_batch_ids: JSON array of batch UUIDs to compare against
-      (e.g. '["uuid1","uuid2"]'). If omitted, all stored texts are used.
+    - files: one or more .xlsx, .xls, or .csv files to check.
     - methods: JSON object selecting which detection methods to run.
-    - download_report: reserved for future use (report served via /reports/combined).
-    - report_format: reserved for future use.
+    - target_column: the column to run detection on (row-wise mode).
+    - detection_mode: 'row' for cross-row detection, 'column' for within-row column comparison.
+    - target_columns: comma-separated column names (column-wise mode only).
+    - download_report: if true, return the Excel report directly instead of JSON.
+    - color_report: if true, colour-code the downloaded report by severity.
     """
     sbert_model, gpt2_tokenizer, gpt2_model = _get_models(request)
 
@@ -158,9 +159,9 @@ async def run_pipeline_endpoint(
     parsed_files: List[Tuple[str, bytes]] = []
     for upload in files:
         contents = await upload.read()
-        parsed_files.append((upload.filename or "upload.txt", contents))
+        parsed_files.append((upload.filename or "upload.xlsx", contents))
 
-    # ── Discover columns from all uploaded files (XLSX, CSV, TXT) ───────────
+    # ── Discover columns from all uploaded files (XLSX, CSV) ─────────────────
     from app.services.cross_compare import get_available_columns
     columns_by_sheet: dict = {}
     for fname, fbytes in parsed_files:
@@ -174,9 +175,6 @@ async def run_pipeline_endpoint(
                 col_list = [str(c) for c in df_hdr.columns]
                 if col_list:
                     columns_by_sheet[f"{fname} > Sheet1"] = col_list
-            elif fname_lower.endswith(".txt"):
-                # TXT files have a single implicit column named "text"
-                columns_by_sheet[f"{fname} > text"] = ["text"]
         except Exception as exc:
             logger.warning("Column discovery failed for %s: %s", fname, exc)
 
@@ -185,64 +183,97 @@ async def run_pipeline_endpoint(
         all_found_columns.update(col_list)
 
     resolved_target: str = ""
+    resolved_target_columns: List[str] = []
 
-    if not target_column or target_column.strip().lower() == "auto":
-        # 1. Prefer an explicit "Query" column.
-        query_match = next(
-            (c for c in all_found_columns if c.lower() == "query"), None
+    # ── Validate detection_mode ───────────────────────────────────────────────
+    if detection_mode not in ("row", "column"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"detection_mode must be 'row' or 'column', got '{detection_mode}'.",
         )
-        if query_match:
-            resolved_target = query_match
-            logger.info("Auto-detected target column: %s", resolved_target)
-        elif len(all_found_columns) == 1:
-            # 2. Single-column file (e.g. TXT) — use it automatically.
-            resolved_target = next(iter(all_found_columns))
-            logger.info("Single column available, using: %s", resolved_target)
+
+    if detection_mode == "row":
+        if not target_column or target_column.strip().lower() == "auto":
+            # 1. Prefer an explicit "Query" column.
+            query_match = next(
+                (c for c in all_found_columns if c.lower() == "query"), None
+            )
+            if query_match:
+                resolved_target = query_match
+                logger.info("Auto-detected target column: %s", resolved_target)
+            elif len(all_found_columns) == 1:
+                # 2. Single-column file — use it automatically.
+                resolved_target = next(iter(all_found_columns))
+                logger.info("Single column available, using: %s", resolved_target)
+            else:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": (
+                            "No 'Query' column found in uploaded files. "
+                            "Please specify target_column from the available columns."
+                        ),
+                        "available_columns": sorted(all_found_columns),
+                    },
+                )
         else:
+            # User specified a column — verify it exists
+            match = next(
+                (c for c in all_found_columns if c.lower() == target_column.strip().lower()),
+                None,
+            )
+            if match:
+                resolved_target = match
+            else:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": (
+                            f"Column '{target_column}' not found in uploaded files. "
+                            "Please choose from the available columns."
+                        ),
+                        "available_columns": sorted(all_found_columns),
+                    },
+                )
+
+    else:  # detection_mode == "column"
+        # ── Column-wise validation ────────────────────────────────────────────
+        # 1. Exactly one non-ZIP file
+        if len(parsed_files) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail="Column-wise mode requires exactly one uploaded file.",
+            )
+        # 2. At least 2 column names
+        col_names = [c.strip() for c in target_columns.split(",") if c.strip()]
+        if len(col_names) < 2:
+            raise HTTPException(
+                status_code=422,
+                detail="Column-wise mode requires at least 2 column names in target_columns.",
+            )
+        # 3. Each column must exist in the uploaded file
+        missing = [
+            c for c in col_names
+            if not any(c.lower() == fc.lower() for fc in all_found_columns)
+        ]
+        if missing:
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": (
-                        "No 'Query' column found in uploaded files. "
-                        "Please specify target_column from the available columns."
-                    ),
+                    "message": f"Column(s) not found in uploaded file: {missing}",
                     "available_columns": sorted(all_found_columns),
                 },
             )
-    else:
-        # User specified a column — verify it exists
-        match = next(
-            (c for c in all_found_columns if c.lower() == target_column.strip().lower()),
-            None,
-        )
-        if match:
-            resolved_target = match
-        else:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": (
-                        f"Column '{target_column}' not found in uploaded files. "
-                        "Please choose from the available columns."
-                    ),
-                    "available_columns": sorted(all_found_columns),
-                },
-            )
-
-    # ── Load reference texts ──────────────────────────────────────────────────
-    batch_ids: List[str] = []
-    if reference_batch_ids:
-        try:
-            batch_ids = json.loads(reference_batch_ids)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid 'reference_batch_ids' JSON: {exc}",
-            ) from exc
+        # Canonicalise to actual case from the file
+        resolved_target_columns = [
+            next(fc for fc in all_found_columns if fc.lower() == c.lower())
+            for c in col_names
+        ]
 
     logger.info(
-        "Pipeline run: %d files, target_column=%s, methods=%s",
-        len(parsed_files), resolved_target, methods_config.model_dump(),
+        "Pipeline run: %d files, detection_mode=%s, target_column=%s, target_columns=%s, methods=%s",
+        len(parsed_files), detection_mode, resolved_target, resolved_target_columns,
+        methods_config.model_dump(),
     )
 
     result = await run_full_pipeline(
@@ -257,6 +288,8 @@ async def run_pipeline_endpoint(
         semantic_threshold=settings.SEMANTIC_THRESHOLD,
         web_scan_timeout=settings.WEB_SCAN_TIMEOUT,
         web_scan_retries=settings.WEB_SCAN_RETRIES,
+        detection_mode=detection_mode,
+        target_columns=resolved_target_columns,
     )
 
     if download_report:
@@ -277,48 +310,3 @@ async def run_pipeline_endpoint(
         )
 
     return result
-
-
-@router.post("/run-on-server", response_model=PipelineResult)
-async def run_pipeline_on_server(request: Request, body: ServerPipelineRequest):
-    """Run the full pipeline on already-registered server-side batches.
-
-    Useful for large datasets that are pre-uploaded via /ingest/reference/register.
-    All texts in the specified batches are loaded and checked against each other.
-    """
-    sbert_model, gpt2_tokenizer, gpt2_model = _get_models(request)
-
-    if not body.batch_ids:
-        raise HTTPException(
-            status_code=400, detail="Provide at least one batch_id."
-        )
-
-    # Load all texts from the specified batches
-    all_texts: List[str] = []
-    for bid in body.batch_ids:
-        rows = await async_fetch_all_texts_by_batch(bid)
-        all_texts.extend(rows)
-
-    if not all_texts:
-        raise HTTPException(
-            status_code=400,
-            detail="No texts found in the specified batches.",
-        )
-
-    logger.info(
-        "Server pipeline run: %d texts from %d batches, methods=%s",
-        len(all_texts), len(body.batch_ids), body.methods.model_dump(),
-    )
-
-    return await run_pipeline(
-        texts=all_texts,
-        methods_config=body.methods,
-        reference_texts=all_texts,
-        sbert_model=sbert_model,
-        gpt2_tokenizer=gpt2_tokenizer,
-        gpt2_model=gpt2_model,
-        fuzzy_threshold=settings.FUZZY_THRESHOLD,
-        semantic_threshold=settings.SEMANTIC_THRESHOLD,
-        web_scan_timeout=settings.WEB_SCAN_TIMEOUT,
-        web_scan_retries=settings.WEB_SCAN_RETRIES,
-    )

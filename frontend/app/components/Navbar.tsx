@@ -5,10 +5,9 @@ import Link from "next/link";
 import { useTheme } from "./ThemeProvider";
 
 const NAV_LINKS = [
-  { label: "Home",      href: "#home" },
-  { label: "About",     href: "#about" },
-  { label: "Analyze",   href: "/analyze" },
-  { label: "Register",  href: "/register" },
+  { label: "Home",    href: "#home" },
+  { label: "About",   href: "#about" },
+  { label: "Analyze", href: "/analyze" },
 ];
 
 export default function Navbar() {

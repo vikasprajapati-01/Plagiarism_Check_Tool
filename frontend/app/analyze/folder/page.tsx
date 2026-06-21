@@ -16,9 +16,15 @@ export default function FolderUploadPage() {
 
   const folderInputRef = useRef<HTMLInputElement>(null);
 
+  const ALLOWED_EXTS = [".xlsx", ".xls", ".csv"];
+
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      setFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
+      const filtered = Array.from(e.target.files).filter((f) => {
+        const ext = f.name.slice(f.name.lastIndexOf(".")).toLowerCase();
+        return ALLOWED_EXTS.includes(ext);
+      });
+      setFiles((prev) => [...prev, ...filtered]);
     }
   };
 
@@ -156,8 +162,8 @@ export default function FolderUploadPage() {
             
             <div style={{ marginTop: 14, padding: "10px 14px", background: "#14B8A614", border: "1px solid #14B8A630", borderRadius: 8 }}>
               <p style={{ fontSize: 12, color: "#0F766E", fontWeight: 500 }}>
-                 ℹ️ **Supported Formats:** .csv, .xlsx, .xls, .txt. <br/>
-                 Any unsupported files in the folder will be safely ignored.
+                 ℹ️ <strong>Supported Formats:</strong> .xlsx, .xls, .csv. <br/>
+                 Any unsupported files in the folder will be automatically ignored.
               </p>
             </div>
           </div>
