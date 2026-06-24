@@ -123,7 +123,8 @@ async def run_pipeline_endpoint(
     report_format: str = Form("excel"),
     color_report: bool = Form(False),
     detection_mode: str = Form("row"),       # "row" | "column"
-    target_columns: str = Form(""),          # comma-separated, used only in column mode
+    col1_name: str = Form(""),               # first column name (column-wise mode only)
+    col2_name: str = Form(""),               # second column name (column-wise mode only)
 ):
     """Run the full detection pipeline on uploaded Excel/CSV files.
 
@@ -131,7 +132,8 @@ async def run_pipeline_endpoint(
     - methods: JSON object selecting which detection methods to run.
     - target_column: the column to run detection on (row-wise mode).
     - detection_mode: 'row' for cross-row detection, 'column' for within-row column comparison.
-    - target_columns: comma-separated column names (column-wise mode only).
+    - col1_name: first column name (column-wise mode only).
+    - col2_name: second column name (column-wise mode only).
     - download_report: if true, return the Excel report directly instead of JSON.
     - color_report: if true, colour-code the downloaded report by severity.
     """
@@ -183,7 +185,6 @@ async def run_pipeline_endpoint(
         all_found_columns.update(col_list)
 
     resolved_target: str = ""
-    resolved_target_columns: List[str] = []
 
     # ── Validate detection_mode ───────────────────────────────────────────────
     if detection_mode not in ("row", "column"):
@@ -238,42 +239,79 @@ async def run_pipeline_endpoint(
 
     else:  # detection_mode == "column"
         # ── Column-wise validation ────────────────────────────────────────────
-        # 1. Exactly one non-ZIP file
+        # 1. Exactly one file
         if len(parsed_files) != 1:
             raise HTTPException(
                 status_code=422,
-                detail="Column-wise mode requires exactly one uploaded file.",
+                detail={
+                    "message": (
+                        "Column-wise detection requires exactly one "
+                        "uploaded file. Please upload a single "
+                        "Excel file."
+                    )
+                },
             )
-        # 2. At least 2 column names
-        col_names = [c.strip() for c in target_columns.split(",") if c.strip()]
-        if len(col_names) < 2:
+        # 2. File must be xlsx or xls
+        fname_check = parsed_files[0][0].lower()
+        if not fname_check.endswith((".xlsx", ".xls")):
             raise HTTPException(
                 status_code=422,
-                detail="Column-wise mode requires at least 2 column names in target_columns.",
+                detail={
+                    "message": (
+                        "Column-wise detection requires an Excel "
+                        "file (.xlsx or .xls). CSV is not supported "
+                        "for column-wise mode."
+                    )
+                },
             )
-        # 3. Each column must exist in the uploaded file
-        missing = [
-            c for c in col_names
-            if not any(c.lower() == fc.lower() for fc in all_found_columns)
-        ]
+        # 3. Both column names must be provided
+        if not col1_name.strip() or not col2_name.strip():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "Column-wise detection requires two column "
+                        "names. Please provide col1_name and "
+                        "col2_name."
+                    )
+                },
+            )
+        # 4. Both column names must exist in the file
+        col1_match = next(
+            (c for c in all_found_columns
+             if c.lower() == col1_name.strip().lower()),
+            None,
+        )
+        col2_match = next(
+            (c for c in all_found_columns
+             if c.lower() == col2_name.strip().lower()),
+            None,
+        )
+        missing = []
+        if not col1_match:
+            missing.append(col1_name.strip())
+        if not col2_match:
+            missing.append(col2_name.strip())
         if missing:
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": f"Column(s) not found in uploaded file: {missing}",
+                    "message": (
+                        f"Column(s) {missing} not found in the "
+                        f"uploaded file."
+                    ),
                     "available_columns": sorted(all_found_columns),
                 },
             )
-        # Canonicalise to actual case from the file
-        resolved_target_columns = [
-            next(fc for fc in all_found_columns if fc.lower() == c.lower())
-            for c in col_names
-        ]
+        # Resolve to actual cased column names from the file
+        col1_name = col1_match
+        col2_name = col2_match
 
     logger.info(
-        "Pipeline run: %d files, detection_mode=%s, target_column=%s, target_columns=%s, methods=%s",
-        len(parsed_files), detection_mode, resolved_target, resolved_target_columns,
-        methods_config.model_dump(),
+        "Pipeline run: %d files, detection_mode=%s, target_column=%s, "
+        "col1=%s, col2=%s, methods=%s",
+        len(parsed_files), detection_mode, resolved_target,
+        col1_name, col2_name, methods_config.model_dump(),
     )
 
     result = await run_full_pipeline(
@@ -289,7 +327,8 @@ async def run_pipeline_endpoint(
         web_scan_timeout=settings.WEB_SCAN_TIMEOUT,
         web_scan_retries=settings.WEB_SCAN_RETRIES,
         detection_mode=detection_mode,
-        target_columns=resolved_target_columns,
+        col1_name=col1_name,
+        col2_name=col2_name,
     )
 
     if download_report:
