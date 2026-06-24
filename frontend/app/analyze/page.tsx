@@ -120,6 +120,12 @@ export default function AnalyzePage() {
 
   const [targetColumn, setTargetColumn] = useState("");
 
+  const [detectionMode, setDetectionMode] = useState<"row" | "column">("row");
+  const [col1Name, setCol1Name] = useState("");
+  const [col2Name, setCol2Name] = useState("");
+  const [availableColumns, setAvailableColumns] = useState<string[]>([]);
+  const [columnDiscoveryLoading, setColumnDiscoveryLoading] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PipelineRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -135,7 +141,41 @@ export default function AnalyzePage() {
 
   const totalSize = useMemo(() => files.reduce((acc, f) => acc + (f.size || 0), 0), [files]);
 
-
+  // Discover available columns whenever files or detectionMode change (column-wise only)
+  useEffect(() => {
+    if (detectionMode !== "column" || files.length === 0) {
+      setAvailableColumns([]);
+      return;
+    }
+    const xlsxFile = files.find(
+      (f) =>
+        f.name.toLowerCase().endsWith(".xlsx") ||
+        f.name.toLowerCase().endsWith(".xls")
+    );
+    if (!xlsxFile) {
+      setAvailableColumns([]);
+      return;
+    }
+    let cancelled = false;
+    setColumnDiscoveryLoading(true);
+    const fd = new FormData();
+    fd.append("files", xlsxFile);
+    fetch(`${API_BASE}/api/v1/pipeline/columns`, { method: "POST", body: fd })
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => {
+        if (!cancelled)
+          setAvailableColumns(Array.isArray(data.all_columns) ? data.all_columns : []);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableColumns([]);
+      })
+      .finally(() => {
+        if (!cancelled) setColumnDiscoveryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [files, detectionMode]);
 
   function addFiles(incoming: FileList | File[]) {
     const list = Array.from(incoming);
@@ -175,7 +215,24 @@ export default function AnalyzePage() {
       return;
     }
 
-
+    if (detectionMode === "column") {
+      if (files.length !== 1) {
+        setError("Column-wise detection requires exactly one file.");
+        return;
+      }
+      if (!col1Name.trim()) {
+        setError("Please enter Column 1 Name.");
+        return;
+      }
+      if (!col2Name.trim()) {
+        setError("Please enter Column 2 Name.");
+        return;
+      }
+      if (col1Name.trim().toLowerCase() === col2Name.trim().toLowerCase()) {
+        setError("Both column names must be different.");
+        return;
+      }
+    }
 
     setLoading(true);
     setError(null);
@@ -199,8 +256,13 @@ export default function AnalyzePage() {
 
       fd.append("methods", JSON.stringify(methods));
 
-      fd.append("detection_mode", "row");
-      fd.append("target_column", targetColumn.trim() ? targetColumn.trim() : "auto");
+      fd.append("detection_mode", detectionMode);
+      if (detectionMode === "column") {
+        fd.append("col1_name", col1Name.trim());
+        fd.append("col2_name", col2Name.trim());
+      } else {
+        fd.append("target_column", targetColumn.trim() ? targetColumn.trim() : "auto");
+      }
 
       fd.append("download_report", "false");
       fd.append("report_format", "excel");
@@ -478,6 +540,11 @@ export default function AnalyzePage() {
               </div>
             )}
           </div>
+          {detectionMode === "column" && (
+            <p style={{ fontSize: 12, color: "var(--accent)", fontWeight: 800, marginTop: 10 }}>
+              Column-wise mode supports one Excel file only (.xlsx or .xls)
+            </p>
+          )}
         </Section>
 
         {/* Options */}
@@ -504,18 +571,105 @@ export default function AnalyzePage() {
           </div>
         </Section>
 
-        {/* Column Specification */}
-        <Section title="Query Column">
-          <InputField
-            label="Query Column"
-            value={targetColumn}
-            onChange={setTargetColumn}
-            placeholder="Auto (recommended)"
-          />
-          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-            Use this if your file doesn&apos;t have a default query column. Leave blank for auto-detect.
+        {/* Detection Mode */}
+        <Section title="Detection Mode">
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button
+              type="button"
+              id="mode-row"
+              onClick={() => { setDetectionMode("row"); setAvailableColumns([]); }}
+              style={{
+                flex: 1,
+                padding: "10px 14px",
+                borderRadius: 12,
+                border: `1px solid ${detectionMode === "row" ? "var(--accent)" : "var(--border)"}`,
+                background: detectionMode === "row" ? "var(--accent-glow)" : "var(--bg-secondary)",
+                color: detectionMode === "row" ? "var(--accent)" : "var(--text-secondary)",
+                fontWeight: 900,
+                cursor: "pointer",
+                transition: "all var(--transition)",
+                fontSize: 14,
+              }}
+            >
+              Row-wise
+            </button>
+            <button
+              type="button"
+              id="mode-column"
+              onClick={() => setDetectionMode("column")}
+              style={{
+                flex: 1,
+                padding: "10px 14px",
+                borderRadius: 12,
+                border: `1px solid ${detectionMode === "column" ? "var(--accent)" : "var(--border)"}`,
+                background: detectionMode === "column" ? "var(--accent-glow)" : "var(--bg-secondary)",
+                color: detectionMode === "column" ? "var(--accent)" : "var(--text-secondary)",
+                fontWeight: 900,
+                cursor: "pointer",
+                transition: "all var(--transition)",
+                fontSize: 14,
+              }}
+            >
+              Column-wise
+            </button>
+          </div>
+          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            {detectionMode === "row"
+              ? "Compares rows across files. Multiple files supported."
+              : "Compares two columns within the same row. Single .xlsx or .xls file only."}
           </p>
         </Section>
+
+        {/* Column Specification */}
+        {detectionMode === "row" ? (
+          <Section title="Query Column">
+            <InputField
+              label="Query Column"
+              value={targetColumn}
+              onChange={setTargetColumn}
+              placeholder="Auto (recommended)"
+            />
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+              Use this if your file doesn&apos;t have a default query column. Leave blank for auto-detect.
+            </p>
+          </Section>
+        ) : (
+          <Section title="Column Names">
+            <div style={{ display: "grid", gap: 14 }}>
+              <div>
+                <InputField
+                  label="Column 1 Name"
+                  value={col1Name}
+                  onChange={setCol1Name}
+                  placeholder="e.g. Query"
+                />
+                {columnDiscoveryLoading && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                    Discovering columns…
+                  </p>
+                )}
+                {!columnDiscoveryLoading && availableColumns.length > 0 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                    Available columns: {availableColumns.join(", ")}
+                  </p>
+                )}
+              </div>
+              <div>
+                <InputField
+                  label="Column 2 Name"
+                  value={col2Name}
+                  onChange={setCol2Name}
+                  placeholder="e.g. Response"
+                />
+                {!columnDiscoveryLoading && availableColumns.length > 0 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                    Available columns: {availableColumns.join(", ")}
+                  </p>
+                )}
+              </div>
+            </div>
+          </Section>
+        )}
 
         {/* Submit */}
         <button
@@ -536,7 +690,7 @@ export default function AnalyzePage() {
             marginBottom: 18,
           }}
         >
-          {loading ? "⏳ Analyzing…" : "Run Scan"}
+          {loading ? "Analyzing…" : "Run Scan"}
         </button>
 
         {error && (
@@ -554,6 +708,11 @@ export default function AnalyzePage() {
                 <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 6 }}>
                   Total entries: {String(result.summary?.total_entries ?? "—")} · Flagged: {String(result.summary?.flagged ?? "—")}
                 </p>
+                {detectionMode === "column" && (!result.row_duplicates || result.row_duplicates.length === 0) && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6, padding: "4px 10px", background: "var(--bg-secondary)", borderRadius: 8, display: "inline-block" }}>
+                    Row-to-Row: Not applicable in column-wise mode
+                  </p>
+                )}
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <button type="button" onClick={() => void openReportPreview()} style={primaryButtonStyle()}>

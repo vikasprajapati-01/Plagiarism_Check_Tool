@@ -273,111 +273,138 @@ def compare_cells(cells, threshold=75.0):
 def compare_columns_within_rows(
     file_name: str,
     contents: bytes,
-    target_columns: List[str],
+    col1_name: str,
+    col2_name: str,
     threshold: float = 75.0,
 ) -> List[MatchPair]:
-    """Compare specified columns against each other WITHIN the same row.
+    """Compare two named columns WITHIN the same row — no cross-row comparison.
 
-    For every row in the file, compares every pair of target_columns using
-    the same exact + fuzzy logic as compare_cells().  No cross-row comparison
-    is performed — this is purely horizontal (within-row) detection.
+    For each data row in the workbook, col1_name[RowN] is compared against
+    col2_name[RowN] only.  col1_name[RowN] is NEVER compared against
+    col2_name[RowM] where M != N.
 
     Args:
-        file_name: Display name used in labels (e.g. ``"dataset.xlsx"``).
-        contents:  Raw bytes of the XLSX file.
-        target_columns: Two or more column header names to compare pairwise.
-        threshold: Minimum fuzzy similarity (0–100) to flag as Near-duplicate.
+        file_name:  Display name used in labels (e.g. ``"dataset.xlsx"``).
+        contents:   Raw bytes of the XLSX file.
+        col1_name:  Header name of the first column to compare.
+        col2_name:  Header name of the second column to compare.
+        threshold:  Minimum fuzzy similarity (0–100) to flag as Near-duplicate.
 
     Returns:
-        A list of MatchPair objects sorted by similarity descending,
-        using ``level="Cell"`` so they slot into the Cell-to-Cell sheet.
+        A list of MatchPair objects (``level="Cell"``) sorted by similarity
+        descending, ready to slot into the Cell-to-Cell sheet.
+        Labels use the format ``"{file_name}-Row{row_idx}-{col_name}"``.
     """
     import logging as _logging
     _log = _logging.getLogger(__name__)
 
-    # ── Step 1: read header → column-index mapping for each sheet ────────────
-    wb = load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
-    # sheet_header_map: { sheet_name → { col_name_lower → col_idx (1-based) } }
-    sheet_header_map: Dict[str, Dict[str, int]] = {}
-    for sname in wb.sheetnames:
-        ws = wb[sname]
-        first_row = next(ws.iter_rows(max_row=1, values_only=True), None)
-        if first_row is None:
-            sheet_header_map[sname] = {}
-            continue
-        hmap: Dict[str, int] = {}
-        for ci, val in enumerate(first_row, 1):
-            if val is not None:
-                hmap[str(val).strip().lower()] = ci
-        sheet_header_map[sname] = hmap
-    wb.close()
+    col1_lower = col1_name.strip().lower()
+    col2_lower = col2_name.strip().lower()
 
-    target_lower = [c.strip().lower() for c in target_columns]
-
-    # ── Step 2: parse all cells (no column filter) ───────────────────────────
-    _, all_cells = parse_excel_file(file_name, contents, target_column=None, filter_to_target=False)
-
-    # Build lookup: (sheet_name, row_idx, col_idx) → CellRef
-    cell_lookup: Dict[Tuple[str, int, int], CellRef] = {}
-    for cr in all_cells:
-        cell_lookup[(cr.sheet_name, cr.row, cr.col)] = cr
-
-    # ── Step 3: collect unique (sheet_name, row_idx) pairs ──────────────────
-    seen_rows: Set[Tuple[str, int]] = set()
-    for cr in all_cells:
-        seen_rows.add((cr.sheet_name, cr.row))
-
-    # ── Step 4: for each row, compare every pair of target columns ───────────
     matches: List[MatchPair] = []
 
-    for (sname, row_idx) in sorted(seen_rows):
-        hmap = sheet_header_map.get(sname, {})
+    wb = load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
 
-        # Resolve col indices for the requested column names in this sheet
-        col_indices: List[Optional[int]] = []
-        for col_lower in target_lower:
-            col_indices.append(hmap.get(col_lower))
+    for sname in wb.sheetnames:
+        ws = wb[sname]
 
-        # Need at least 2 resolved columns to form any pair
-        resolved = [(target_columns[i], col_indices[i])
-                    for i in range(len(target_lower))
-                    if col_indices[i] is not None]
-        if len(resolved) < 2:
+        # ── Read header row ──────────────────────────────────────────────────
+        header_row = next(ws.iter_rows(max_row=1, values_only=True), None)
+        if header_row is None:
+            _log.warning(
+                "compare_columns_within_rows: sheet '%s' has no header row — skipping.",
+                sname,
+            )
             continue
 
-        # Compare every pair (combinations — no duplicates, A-vs-B only once)
-        for (name_a, cidx_a), (name_b, cidx_b) in combinations(resolved, 2):
-            ref_a = cell_lookup.get((sname, row_idx, cidx_a))
-            ref_b = cell_lookup.get((sname, row_idx, cidx_b))
+        # Build case-insensitive header → 0-based index map
+        header_map: Dict[str, int] = {}
+        for ci, val in enumerate(header_row):
+            if val is not None:
+                header_map[str(val).strip().lower()] = ci
 
-            if ref_a is None or ref_b is None:
-                continue
-            if len(ref_a.cleaned_value) < 3 or len(ref_b.cleaned_value) < 3:
+        # Resolve column indices (0-based)
+        col1_idx = header_map.get(col1_lower)
+        col2_idx = header_map.get(col2_lower)
+
+        if col1_idx is None:
+            _log.warning(
+                "compare_columns_within_rows: column '%s' not found in sheet '%s' — skipping sheet.",
+                col1_name, sname,
+            )
+            continue
+        if col2_idx is None:
+            _log.warning(
+                "compare_columns_within_rows: column '%s' not found in sheet '%s' — skipping sheet.",
+                col2_name, sname,
+            )
+            continue
+
+        # ── Iterate data rows (row_idx is 1-based; header is row 1) ─────────
+        for row_idx, row in enumerate(
+            ws.iter_rows(min_row=2, values_only=True), start=2
+        ):
+            # Safely extract cell values (row may be shorter than header)
+            raw1 = row[col1_idx] if col1_idx < len(row) else None
+            raw2 = row[col2_idx] if col2_idx < len(row) else None
+
+            # Skip if either cell is empty / None
+            if raw1 is None or raw2 is None:
                 continue
 
-            if ref_a.cleaned_value == ref_b.cleaned_value:
-                matches.append(_make_match(
-                    ref_a.label, ref_b.label,
-                    ref_a.raw_value, ref_b.raw_value,
-                    "Exact", 100.0, "Cell",
-                    sname, row_idx, cidx_a,
-                    sname, row_idx, cidx_b,
-                ))
+            str1 = str(raw1).strip()
+            str2 = str(raw2).strip()
+
+            if not str1 or not str2:
+                continue
+
+            # Clean both values using the existing preprocessor
+            clean1 = preprocess_text(str1)
+            clean2 = preprocess_text(str2)
+
+            if not clean1 or not clean2:
+                continue
+
+            # Build labels: "{file_name}-Row{row_idx}-{col_name}"
+            label1 = f"{file_name}-Row{row_idx}-{col1_name}"
+            label2 = f"{file_name}-Row{row_idx}-{col2_name}"
+
+            if clean1 == clean2:
+                # Exact match
+                matches.append(
+                    MatchPair(
+                        original_label=label1,
+                        duplicate_label=label2,
+                        original_text=str1,
+                        duplicate_text=str2,
+                        match_type="Exact",
+                        similarity=100.0,
+                        level="Cell",
+                    )
+                )
             else:
-                sim = levenshtein_similarity(ref_a.cleaned_value, ref_b.cleaned_value) * 100
+                sim = levenshtein_similarity(clean1, clean2) * 100
                 if sim >= threshold:
-                    matches.append(_make_match(
-                        ref_a.label, ref_b.label,
-                        ref_a.raw_value, ref_b.raw_value,
-                        "Near", round(sim, 1), "Cell",
-                        sname, row_idx, cidx_a,
-                        sname, row_idx, cidx_b,
-                    ))
+                    # Near match
+                    matches.append(
+                        MatchPair(
+                            original_label=label1,
+                            duplicate_label=label2,
+                            original_text=str1,
+                            duplicate_text=str2,
+                            match_type="Near",
+                            similarity=round(sim, 1),
+                            level="Cell",
+                        )
+                    )
+
+    wb.close()
 
     matches.sort(key=lambda m: m.similarity, reverse=True)
     _log.info(
-        "compare_columns_within_rows: %d rows checked, %d pairs flagged (threshold=%.1f)",
-        len(seen_rows), len(matches), threshold,
+        "compare_columns_within_rows: %d pairs flagged "
+        "(col1='%s', col2='%s', threshold=%.1f)",
+        len(matches), col1_name, col2_name, threshold,
     )
     return matches
 

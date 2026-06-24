@@ -38,7 +38,8 @@ async def run_full_pipeline(
     web_scan_timeout: int = 10,
     web_scan_retries: int = 3,
     detection_mode: str = "row",
-    target_columns: Optional[List[str]] = None,
+    col1_name: str = "",
+    col2_name: str = "",
 ) -> PipelineRunResult:
     pipeline_id = str(uuid.uuid4())
     row_duplicates: List[DuplicatePairResult] = []
@@ -87,8 +88,6 @@ async def run_full_pipeline(
             logger.warning("Failed to read file %s: %s", filename, exc)
             entries_by_file[filename] = []
 
-    _target_columns: List[str] = list(target_columns) if target_columns else []
-
     try:
         loop = asyncio.get_running_loop()
         from functools import partial
@@ -103,7 +102,7 @@ async def run_full_pipeline(
         row_matches, cell_matches = [], []
 
         if detection_mode == "column":
-            # Column-wise: compare specified columns within each row (no cross-row).
+            # Column-wise: compare col1_name vs col2_name within each row.
             # row_duplicates stays empty; cell_duplicates is populated.
             if compare_files and (methods_config.exact or methods_config.fuzzy):
                 fname_cw, fbytes_cw = compare_files[0]
@@ -113,7 +112,8 @@ async def run_full_pipeline(
                         compare_columns_within_rows,
                         fname_cw,
                         fbytes_cw,
-                        _target_columns,
+                        col1_name,
+                        col2_name,
                         threshold,
                     ),
                 )
@@ -157,22 +157,48 @@ async def run_full_pipeline(
 
     target_entries = []
     if methods_config.web_scan or methods_config.ai_detection or methods_config.license_check:
-        # In column-wise mode filter by any of the target_columns;
-        # in row-wise mode filter by the single target_column.
         if detection_mode == "column":
-            _target_cols_lower: set = {c.strip().lower() for c in _target_columns}
-        else:
-            _target_cols_lower = {target_column.strip().lower()}
+            # Only run on rows that were flagged as duplicate pairs.
+            # Parse row indices from cell_duplicates labels ("filename-RowN-colname").
+            flagged_row_indices: set = set()
+            for pair in cell_duplicates:
+                for label in [pair.original, pair.duplicate]:
+                    parts = label.split("-Row")
+                    if len(parts) >= 2:
+                        row_part = parts[1].split("-")[0]
+                        try:
+                            flagged_row_indices.add(int(row_part))
+                        except ValueError:
+                            pass
 
-        for entries in entries_by_file.values():
-            for entry in entries:
-                col = entry.get("column_name", "").strip().lower()
-                if col not in _target_cols_lower:
-                    continue
-                raw_text = entry.get("text", "")
-                if not raw_text or not raw_text.strip():
-                    continue
-                target_entries.append(entry)
+            col_names_lower = {
+                col1_name.strip().lower(),
+                col2_name.strip().lower(),
+            }
+            for entries in entries_by_file.values():
+                for entry in entries:
+                    col = entry.get("column_name", "").strip().lower()
+                    if col not in col_names_lower:
+                        continue
+                    row_num = entry.get("row_number")
+                    if row_num not in flagged_row_indices:
+                        continue
+                    raw_text = entry.get("text", "")
+                    if not raw_text or not raw_text.strip():
+                        continue
+                    target_entries.append(entry)
+        else:
+            # Row-wise: existing behavior unchanged.
+            _target_cols_lower: set = {target_column.strip().lower()}
+            for entries in entries_by_file.values():
+                for entry in entries:
+                    col = entry.get("column_name", "").strip().lower()
+                    if col not in _target_cols_lower:
+                        continue
+                    raw_text = entry.get("text", "")
+                    if not raw_text or not raw_text.strip():
+                        continue
+                    target_entries.append(entry)
 
     # Cap concurrent web/AI/license tasks so we don't flood the thread pool
     # or blow the global WEB_SCAN_OVERALL_TIMEOUT on large uploads.
