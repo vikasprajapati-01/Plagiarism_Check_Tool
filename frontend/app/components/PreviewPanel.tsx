@@ -330,7 +330,7 @@ export default function PreviewPanel({
           </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs for report kind */}
         {kind === "report" && (
           <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--border)", display: "flex", gap: 10, flexWrap: "wrap" }}>
             {reportTabs.map((t) => (
@@ -373,6 +373,17 @@ function CleanedPreview({
     note?: string;
   } | null;
 }) {
+  const [activeFileIdx, setActiveFileIdx] = useState(0);
+  const [activeSheet, setActiveSheet] = useState<string>("");
+
+  // Sync active sheet when file changes
+  const currentFile = data?.files?.[activeFileIdx];
+  const currentSheets = currentFile?.sheets ?? [];
+  const resolvedSheet = activeSheet && currentSheets.some((s) => s.sheet_name === activeSheet)
+    ? activeSheet
+    : (currentSheets[0]?.sheet_name ?? "");
+  const sheetData = currentSheets.find((s) => s.sheet_name === resolvedSheet);
+
   if (!data || !Array.isArray(data.files) || data.files.length === 0) {
     return (
       <div style={{
@@ -388,98 +399,186 @@ function CleanedPreview({
   }
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Summary bar */}
       <div style={{
         background: "var(--bg-card)",
         border: "1px solid var(--border)",
         borderRadius: 14,
-        padding: 16,
+        padding: "14px 16px",
       }}>
-        <p style={{ fontSize: 12, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+        <p style={{ fontSize: 11, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
           Cleaned Summary
         </p>
-        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 10 }}>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginTop: 8 }}>
           <SummaryStat label="Files" value={String(data.total_files)} />
           <SummaryStat label="Total Unique Rows" value={String(data.total_entries)} />
         </div>
         {data.note && (
-          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 10 }}>{data.note}</p>
+          <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>{data.note}</p>
         )}
       </div>
 
-      {data.files.map((file) => (
-        <div key={file.filename} style={{
+      {/* File tabs — only show if more than 1 file */}
+      {data.files.length > 1 && (
+        <div style={{
           background: "var(--bg-card)",
           border: "1px solid var(--border)",
           borderRadius: 14,
           overflow: "hidden",
         }}>
-          <div style={{ padding: 14, borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
-            <p style={{ fontSize: 13, fontWeight: 900, color: "var(--text-primary)" }}>{file.filename}</p>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-              Unique rows: {file.total_entries}
+          <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
+            <p style={{ fontSize: 11, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>
+              Files
             </p>
-          </div>
-          <div style={{ padding: 14, display: "grid", gap: 12 }}>
-            {file.sheets.map((sheet) => (
-              <div key={sheet.sheet_name} style={{
-                border: "1px solid var(--border)",
-                borderRadius: 12,
-                overflow: "hidden",
-              }}>
-                <div style={{ padding: 10, background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
-                  <p style={{ fontSize: 12, fontWeight: 800, color: "var(--text-secondary)" }}>
-                    {sheet.sheet_name} · {sheet.total_entries} rows
-                  </p>
-                </div>
-                {sheet.rows.length === 0 ? (
-                  <div style={{ padding: 12 }}>
-                    <p style={{ fontSize: 12, color: "var(--text-muted)" }}>No rows after deduplication.</p>
-                  </div>
-                ) : (
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                      <thead>
-                        <tr>
-                          {sheet.headers.map((h) => (
-                            <th
-                              key={h}
-                              style={{
-                                textAlign: "left",
-                                padding: "8px 10px",
-                                background: "var(--bg-card)",
-                                borderBottom: "1px solid var(--border)",
-                                color: "var(--text-secondary)",
-                                fontWeight: 800,
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {h}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sheet.rows.map((row, idx) => (
-                          <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
-                            {sheet.headers.map((_, colIdx) => (
-                              <td key={colIdx} style={{ padding: "8px 10px", color: "var(--text-primary)" }}>
-                                <span style={{ display: "inline-block", maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {row[colIdx] ?? ""}
-                                </span>
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            ))}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {data.files.map((file, idx) => (
+                <button
+                  key={file.filename}
+                  type="button"
+                  onClick={() => { setActiveFileIdx(idx); setActiveSheet(""); }}
+                  title={file.filename}
+                  style={{
+                    padding: "7px 12px",
+                    borderRadius: 10,
+                    border: `1px solid ${idx === activeFileIdx ? "var(--accent)" : "var(--border)"}`,
+                    background: idx === activeFileIdx ? "var(--accent-glow)" : "var(--bg-secondary)",
+                    color: idx === activeFileIdx ? "var(--accent)" : "var(--text-secondary)",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    transition: "all var(--transition)",
+                    maxWidth: 200,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {file.filename.split("/").pop()}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-      ))}
+      )}
+
+      {/* Active file viewer */}
+      {currentFile && (
+        <div style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: 14,
+          overflow: "hidden",
+        }}>
+          {/* File header */}
+          <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <p style={{ fontSize: 13, fontWeight: 900, color: "var(--text-primary)" }}>
+                {currentFile.filename.split("/").pop()}
+              </p>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                {currentFile.total_entries} unique row{currentFile.total_entries !== 1 ? "s" : ""}
+              </p>
+            </div>
+            {/* Sheet tabs */}
+            {currentSheets.length > 1 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {currentSheets.map((sheet) => (
+                  <button
+                    key={sheet.sheet_name}
+                    type="button"
+                    onClick={() => setActiveSheet(sheet.sheet_name)}
+                    style={{
+                      padding: "5px 10px",
+                      borderRadius: 8,
+                      border: `1px solid ${resolvedSheet === sheet.sheet_name ? "var(--accent)" : "var(--border)"}`,
+                      background: resolvedSheet === sheet.sheet_name ? "var(--accent-glow)" : "var(--bg-card)",
+                      color: resolvedSheet === sheet.sheet_name ? "var(--accent)" : "var(--text-secondary)",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      transition: "all var(--transition)",
+                    }}
+                  >
+                    {sheet.sheet_name}
+                    <span style={{ marginLeft: 4, fontSize: 10, opacity: 0.7 }}>({sheet.total_entries})</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sheet data */}
+          {!sheetData ? (
+            <div style={{ padding: 14, color: "var(--text-muted)", fontSize: 13 }}>No sheet data.</div>
+          ) : sheetData.rows.length === 0 ? (
+            <div style={{ padding: 14 }}>
+              <p style={{ fontSize: 13, color: "var(--text-muted)" }}>No rows remaining after deduplication.</p>
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto", maxHeight: 520, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th style={{
+                      textAlign: "left",
+                      padding: "8px 10px",
+                      background: "var(--bg-secondary)",
+                      borderBottom: "1px solid var(--border)",
+                      color: "var(--text-muted)",
+                      fontWeight: 800,
+                      whiteSpace: "nowrap",
+                      position: "sticky",
+                      top: 0,
+                      zIndex: 1,
+                      minWidth: 40,
+                    }}>#</th>
+                    {sheetData.headers.map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          background: "var(--bg-secondary)",
+                          borderBottom: "1px solid var(--border)",
+                          color: "var(--text-secondary)",
+                          fontWeight: 800,
+                          whiteSpace: "nowrap",
+                          position: "sticky",
+                          top: 0,
+                          zIndex: 1,
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sheetData.rows.map((row, idx) => (
+                    <tr key={idx} style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "7px 10px", color: "var(--text-muted)", fontWeight: 700, fontSize: 11 }}>{idx + 1}</td>
+                      {sheetData.headers.map((_, colIdx) => (
+                        <td key={colIdx} style={{ padding: "7px 10px", color: "var(--text-primary)" }}>
+                          <span style={{ display: "inline-block", maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            title={row[colIdx] ?? ""}>
+                            {row[colIdx] ?? ""}
+                          </span>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {sheetData && sheetData.rows.length >= 2000 && (
+            <div style={{ padding: "8px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
+              <p style={{ fontSize: 11, color: "var(--text-muted)" }}>Preview limited to first 2,000 rows. Download to see all data.</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

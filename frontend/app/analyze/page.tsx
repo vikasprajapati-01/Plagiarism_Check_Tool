@@ -10,6 +10,79 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLEANED_EXCEL_ENDPOINT =
   process.env.NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT || `${API_BASE}/api/v1/reports/cleaned`;
 
+// ── Client-side xlsx → sheet-data extraction ─────────────────────────────────
+async function xlsxBlobToSheets(
+  blob: Blob,
+  filename: string,
+): Promise<CleanedFilePreview> {
+  const XLSX = await import("xlsx");
+  const ab = await blob.arrayBuffer();
+  const wb = XLSX.read(ab, { type: "array" });
+
+  const sheets: CleanedFilePreview["sheets"] = [];
+  let totalEntries = 0;
+
+  for (const sheetName of wb.SheetNames) {
+    const ws = wb.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json(ws, {
+      header: 1,
+      blankrows: false,
+    }) as unknown[][];
+
+    const limited = matrix.slice(0, 2001); // header + up to 2000 rows
+    const headers = (limited[0] || []).map((h, i) =>
+      String(h ?? "").trim() || `Column ${i + 1}`,
+    );
+    const rows = limited.slice(1).map((r) =>
+      headers.map((_, i) => String((r as unknown[])[i] ?? "")),
+    );
+    const sheetEntries = rows.length;
+    totalEntries += sheetEntries;
+    sheets.push({
+      sheet_name: sheetName,
+      headers,
+      rows,
+      total_entries: sheetEntries,
+    });
+  }
+
+  return { filename, total_entries: totalEntries, sheets };
+}
+
+async function blobToCleanedPayload(blob: Blob, isZip: boolean, baseFilename: string): Promise<CleanedPreviewPayload> {
+  if (!isZip) {
+    const filePreview = await xlsxBlobToSheets(blob, baseFilename);
+    return {
+      total_files: 1,
+      total_entries: filePreview.total_entries,
+      files: [filePreview],
+    };
+  }
+
+  // ZIP: extract each xlsx entry
+  const JSZip = (await import("jszip")).default;
+  const zip = await JSZip.loadAsync(blob);
+  const fileNames = Object.keys(zip.files).filter(
+    (n) => !zip.files[n].dir && n.toLowerCase().endsWith(".xlsx"),
+  );
+
+  if (!fileNames.length) {
+    return { total_files: 0, total_entries: 0, files: [], note: "No xlsx files found in zip." };
+  }
+
+  const files: CleanedFilePreview[] = [];
+  let totalEntries = 0;
+
+  for (const name of fileNames) {
+    const entryBlob = await zip.files[name].async("blob");
+    const filePreview = await xlsxBlobToSheets(entryBlob, name);
+    totalEntries += filePreview.total_entries;
+    files.push(filePreview);
+  }
+
+  return { total_files: files.length, total_entries: totalEntries, files };
+}
+
 type MethodsConfig = {
   exact: boolean;
   fuzzy: boolean;
@@ -55,11 +128,12 @@ type PreviewState =
   | {
     open: true;
     title: string;
-    kind: "report" | "excel";
+    kind: "report" | "excel" | "cleaned";
     colorReport?: boolean;
     reportData?: PipelineRunResult | null;
     excelBlob?: Blob | null;
     excelFileName?: string;
+    cleanedData?: CleanedPreviewPayload | null;
     download: () => Promise<void>;
     downloading: boolean;
   };
@@ -350,16 +424,21 @@ export default function AnalyzePage() {
       }
 
       const blob = await res.blob();
-      const isZip = res.headers.get("content-type")?.includes("zip");
+      const contentType = res.headers.get("content-type") ?? "";
+      const isZip = contentType.includes("zip");
       const ext = isZip ? "zip" : "xlsx";
       const fileName = `pipeline_${result.pipeline_id.slice(0, 8)}_cleaned.${ext}`;
+
+      // Parse blob client-side to build preview data
+      const cleanedData = await blobToCleanedPayload(blob, isZip, fileName);
 
       setPreview({
         open: true,
         title: "Cleaned File Preview",
-        kind: "excel",
-        excelBlob: isZip ? null : blob,
+        kind: "cleaned",
+        excelBlob: null,
         excelFileName: fileName,
+        cleanedData,
         reportData: null,
         downloading: false,
         download: async () => {
@@ -374,6 +453,40 @@ export default function AnalyzePage() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to generate cleaned file";
       setError(msg);
+    } finally {
+      setCleanedLoading(false);
+    }
+  }
+
+  async function downloadCleanedFile() {
+    if (!result) return;
+    const xlsxFiles = files.filter((f) => f.name.toLowerCase().endsWith(".xlsx"));
+    if (!xlsxFiles.length) {
+      setError("No .xlsx files found in your upload. Cleaned output only works with Excel (.xlsx) files.");
+      return;
+    }
+
+    setCleanedLoading(true);
+    setError(null);
+    try {
+      const fd = new FormData();
+      for (const f of xlsxFiles) fd.append("files", f);
+      fd.append("row_duplicates", JSON.stringify(result.row_duplicates ?? []));
+      fd.append("cell_duplicates", JSON.stringify(result.cell_duplicates ?? []));
+      fd.append("web_ai_results", JSON.stringify(result.web_ai_results ?? []));
+
+      const res = await fetch(CLEANED_EXCEL_ENDPOINT, { method: "POST", body: fd });
+      if (!res.ok) {
+        let msg = "Cleaned file endpoint failed";
+        try { const d = await res.json(); msg = d?.detail || msg; } catch { }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const isZip = (res.headers.get("content-type") ?? "").includes("zip");
+      const ext = isZip ? "zip" : "xlsx";
+      await downloadBlob(blob, `pipeline_${result.pipeline_id.slice(0, 8)}_cleaned.${ext}`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to download cleaned file");
     } finally {
       setCleanedLoading(false);
     }
@@ -606,7 +719,19 @@ export default function AnalyzePage() {
                     cursor: cleanedLoading ? "not-allowed" : "pointer",
                   }}
                 >
-                  {cleanedLoading ? "Generating Cleaned File…" : "Download Cleaned File"}
+                  {cleanedLoading ? "Parsing…" : "Preview Cleaned File"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void downloadCleanedFile()}
+                  disabled={cleanedLoading}
+                  style={{
+                    ...secondaryButtonStyle(),
+                    opacity: cleanedLoading ? 0.7 : 1,
+                    cursor: cleanedLoading ? "not-allowed" : "pointer",
+                  }}
+                >
+                  Download Cleaned
                 </button>
               </div>
             </div>
@@ -631,7 +756,7 @@ export default function AnalyzePage() {
           reportData={preview.reportData}
           excelBlob={preview.excelBlob}
           excelFileName={preview.excelFileName}
-          cleanedData={preview.cleanedData}
+          cleanedData={"cleanedData" in preview ? preview.cleanedData : null}
           downloading={preview.downloading}
           onDownload={preview.download}
           onClose={() => setPreview({ open: false })}
