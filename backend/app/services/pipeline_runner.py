@@ -25,6 +25,45 @@ from app.services.web_scanner import scan_text_online
 logger = logging.getLogger(__name__)
 
 
+def _count_written_rows_in_files(files: List[Tuple[str, bytes]]) -> int:
+    import io
+    import pandas as pd
+    total_rows = 0
+    for filename, contents in files:
+        filename_lower = filename.lower()
+        try:
+            if filename_lower.endswith(".csv"):
+                df = pd.read_csv(io.BytesIO(contents))
+                sheets = {"": df}
+            elif filename_lower.endswith((".xlsx", ".xls")):
+                sheets = pd.read_excel(io.BytesIO(contents), sheet_name=None)
+            else:
+                continue
+
+            for sheet_name, df in sheets.items():
+                if len(df) == 0:
+                    continue
+                header_set = {
+                    str(col).strip().lower()
+                    for col in df.columns
+                    if col is not None and not pd.isna(col)
+                }
+                for _, row in df.iterrows():
+                    vals = [
+                        str(v).strip().lower()
+                        for v in row
+                        if v is not None and not pd.isna(v) and str(v).strip() != ""
+                    ]
+                    if not vals:
+                        continue
+                    if all(v in header_set for v in vals):
+                        continue
+                    total_rows += 1
+        except Exception as exc:
+            logger.warning("Failed to count rows in %s: %s", filename, exc)
+    return total_rows
+
+
 async def run_full_pipeline(
     files: List[Tuple[str, bytes]],
     methods_config: MethodsConfig,
@@ -88,19 +127,9 @@ async def run_full_pipeline(
             logger.warning("Failed to read file %s: %s", filename, exc)
             entries_by_file[filename] = []
 
-    # Count unique data rows across all uploaded files
-    # A "row" is one data entry (not a cell) — so count unique
-    # (source_file, row_number) combinations to avoid counting
-    # the same spreadsheet row multiple times when it has multiple
-    # columns that each produce a separate entry
-    seen_rows: set = set()
-    for entry in all_entries:
-        row_key = (
-            entry.get("source_file", ""),
-            entry.get("row_number", 0),
-        )
-        seen_rows.add(row_key)
-    total_rows: int = len(seen_rows)
+    # Count total written data rows across all uploaded files/sheets
+    # (excludes completely empty rows and duplicate header/query rows)
+    total_rows: int = _count_written_rows_in_files(files)
 
     try:
         loop = asyncio.get_running_loop()
