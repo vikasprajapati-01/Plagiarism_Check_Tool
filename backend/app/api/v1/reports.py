@@ -52,12 +52,36 @@ class CombinedReportRequest(BaseModel):
     color_report: bool = False
 
 
+def _parse_row_key(label: str) -> Optional[Tuple[str, int]]:
+    if not label:
+        return None
+    m = re.search(r"-(?:Row\s+(\d+)|([A-Z]+)(\d+))$", label)
+    if m:
+        row_num = int(m.group(1) or m.group(3))
+        prefix = label[:m.start()]
+        return (prefix, row_num)
+    return (label, 0)
+
+
+def _unique_rows_from_pairs(pairs: list, type_filter: str = None) -> set:
+    seen = set()
+    for pair in pairs:
+        if type_filter and pair.get("type") != type_filter:
+            continue
+        for label in [pair.get("original", ""), pair.get("duplicate", "")]:
+            key = _parse_row_key(label)
+            if key:
+                seen.add(key)
+    return seen
+
+
 def generate_pipeline_report(
     pipeline_id: str,
     row_duplicates: list,
     cell_duplicates: list,
     web_ai_results: list,
     color_report: bool = False,
+    summary: Optional[dict] = None,
 ) -> bytes:
     def _build_pair_df(pairs: List[dict]) -> "pd.DataFrame":
         rows = [
@@ -196,6 +220,261 @@ def generate_pipeline_report(
                             ai_cell.fill = ai_fill
 
             ws.freeze_panes = "A2"
+
+        # ── Create Sheet 4: Risk Summary ─────────────────────────────────────────
+        wb = writer.book
+        ws = wb.create_sheet("Risk Summary")
+        ws.sheet_view.showGridLines = True
+
+        # Write Headers
+        headers_s4 = [
+            "Detection Method",
+            "Flagged Pairs",
+            "Unique Rows Flagged",
+            "Total Rows",
+            "Flag Rate",
+            "Risk Level",
+        ]
+        for col_idx, h in enumerate(headers_s4, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.font = Font(bold=True, size=11, color="FFFFFF")
+            cell.fill = PatternFill(
+                start_color=_HEADER_COLOR,
+                end_color=_HEADER_COLOR,
+                fill_type="solid",
+            )
+            cell.border = Border(
+                left=Side(style="thin"),
+                right=Side(style="thin"),
+                top=Side(style="thin"),
+                bottom=Side(style="thin"),
+            )
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.row_dimensions[1].height = 25
+
+        total_rows = summary.get("total_rows", 0) if summary else 0
+
+        # Calculations
+        exact_unique_rows = _unique_rows_from_pairs(row_duplicates, "Exact")
+        near_unique_rows = _unique_rows_from_pairs(row_duplicates, "Near")
+        
+        ai_unique_rows = {
+            _parse_row_key(r.get("original"))
+            for r in web_ai_results
+            if r.get("ai_detected_pct", 0.0) > 50.0
+        } - {None}
+        
+        web_unique_rows = {
+            _parse_row_key(r.get("original"))
+            for r in web_ai_results
+            if r.get("plagiarised") == "Yes"
+        } - {None}
+
+        exact_pairs = sum(1 for r in row_duplicates if r.get("type") == "Exact")
+        near_pairs = sum(1 for r in row_duplicates if r.get("type") == "Near")
+        semantic_pairs = 0
+        ai_pairs = sum(1 for r in web_ai_results if r.get("ai_detected_pct", 0.0) > 50.0)
+        web_pairs = sum(1 for r in web_ai_results if r.get("plagiarised") == "Yes")
+        license_pairs = 0
+
+        exact_unique = len(exact_unique_rows)
+        near_unique = len(near_unique_rows)
+        semantic_unique = 0
+        ai_unique = len(ai_unique_rows)
+        web_unique = len(web_unique_rows)
+        license_unique = 0
+
+        def _get_risk_level(flagged_unique: int, total: int) -> Tuple[str, Optional[str]]:
+            if total <= 0:
+                return "Clean", "C6EFCE"
+            pct = flagged_unique / total * 100
+            if pct == 0:
+                return "Clean", "C6EFCE"
+            elif pct <= 5:
+                return "Low", "C6EFCE"
+            elif pct <= 20:
+                return "Medium", "FFEB9C"
+            else:
+                return "High", "FFC7CE"
+
+        exact_risk, exact_risk_color = _get_risk_level(exact_unique, total_rows)
+        near_risk, near_risk_color = _get_risk_level(near_unique, total_rows)
+        ai_risk, ai_risk_color = _get_risk_level(ai_unique, total_rows)
+        web_risk, web_risk_color = _get_risk_level(web_unique, total_rows)
+
+        def _format_rate(flagged_unique: int, total: int) -> str:
+            if total <= 0:
+                return "N/A"
+            return f"{(flagged_unique / total * 100):.2f}%"
+
+        # Prepare section 1 rows
+        rows_data = [
+            ("Exact Duplicate", exact_pairs, exact_unique, total_rows, _format_rate(exact_unique, total_rows), exact_risk, exact_risk_color),
+            ("Near Duplicate", near_pairs, near_unique, total_rows, _format_rate(near_unique, total_rows), near_risk, near_risk_color),
+            ("Semantic Similar", semantic_pairs, semantic_unique, total_rows, "0.00%" if total_rows > 0 else "N/A", "Included in Near Duplicate", None),
+            ("AI Generated", ai_pairs, ai_unique, total_rows, _format_rate(ai_unique, total_rows), ai_risk, ai_risk_color),
+            ("Web Plagiarised", web_pairs, web_unique, total_rows, _format_rate(web_unique, total_rows), web_risk, web_risk_color),
+            ("License Violation", license_pairs, license_unique, total_rows, "0.00%" if total_rows > 0 else "N/A", "Not separately tracked", None),
+        ]
+
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+        center_align = Alignment(horizontal="center", vertical="center")
+        left_align_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for row_num, (method, pairs, unique, total, rate, risk, color) in enumerate(rows_data, 2):
+            # Column 1 (Detection Method)
+            c1 = ws.cell(row=row_num, column=1, value=method)
+            c1.alignment = left_align_wrap
+            # Columns 2-5
+            ws.cell(row=row_num, column=2, value=pairs)
+            ws.cell(row=row_num, column=3, value=unique)
+            ws.cell(row=row_num, column=4, value=total)
+            ws.cell(row=row_num, column=5, value=rate)
+            # Column 6 (Risk Level)
+            c6 = ws.cell(row=row_num, column=6, value=risk)
+            if color:
+                c6.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+
+            # Apply borders and alignment to all row cells
+            for col_idx in range(1, 7):
+                cell = ws.cell(row=row_num, column=col_idx)
+                cell.border = thin_border
+                if col_idx > 1:
+                    cell.alignment = center_align
+
+        # Section 2 - Overall dataset summary (rows 8-10)
+        # Row 8 is empty (already empty by default)
+        
+        # Row 9: Overall Dataset Summary Header
+        ws.merge_cells("A9:F9")
+        for col_idx in range(1, 7):
+            cell = ws.cell(row=9, column=col_idx)
+            cell.fill = PatternFill(start_color=_HEADER_COLOR, end_color=_HEADER_COLOR, fill_type="solid")
+            cell.border = thin_border
+        
+        hdr_cell = ws.cell(row=9, column=1, value="Overall Dataset Summary")
+        hdr_cell.font = Font(bold=True, size=11, color="FFFFFF")
+        hdr_cell.alignment = center_align
+        ws.row_dimensions[9].height = 22
+
+        # Row 10: Overall data
+        overall_pairs = exact_pairs + near_pairs + semantic_pairs + ai_pairs + web_pairs + license_pairs
+        all_unique_rows = exact_unique_rows | near_unique_rows | ai_unique_rows | web_unique_rows
+        overall_unique = len(all_unique_rows)
+        overall_rate = _format_rate(overall_unique, total_rows)
+        overall_risk, overall_risk_color = _get_risk_level(overall_unique, total_rows)
+
+        ws.cell(row=10, column=1, value="All Methods Combined")
+        ws.cell(row=10, column=2, value=overall_pairs)
+        ws.cell(row=10, column=3, value=overall_unique)
+        ws.cell(row=10, column=4, value=total_rows)
+        ws.cell(row=10, column=5, value=overall_rate)
+        
+        c10_6 = ws.cell(row=10, column=6, value=overall_risk)
+        if overall_risk_color:
+            c10_6.fill = PatternFill(start_color=overall_risk_color, end_color=overall_risk_color, fill_type="solid")
+
+        for col_idx in range(1, 7):
+            cell = ws.cell(row=10, column=col_idx)
+            cell.border = thin_border
+            cell.alignment = center_align
+            if col_idx == 1:
+                cell.alignment = left_align_wrap
+
+        # Section 3 - PRS Score (rows 11-12)
+        # Row 11 is empty
+        
+        # Row 12
+        lbl_cell = ws.cell(row=12, column=1, value="Plagiarism Risk Score (PRS)")
+        lbl_cell.font = Font(bold=True, size=11)
+        lbl_cell.alignment = Alignment(horizontal="left", vertical="center")
+        
+        total_for_prs = total_rows if total_rows > 0 else 1
+        exact_rate = exact_unique / total_for_prs
+        near_rate = near_unique / total_for_prs
+        semantic_rate = 0.0
+        ai_rate = ai_unique / total_for_prs
+        web_rate = web_unique / total_for_prs
+        license_rate = 0.0
+
+        raw_prs = (
+            exact_rate * 100.0 * 0.40
+            + near_rate * 100.0 * 0.20
+            + semantic_rate * 100.0 * 0.15
+            + ai_rate * 100.0 * 0.10
+            + web_rate * 100.0 * 0.10
+            + license_rate * 100.0 * 0.05
+        )
+        prs = round(min(100.0, raw_prs), 1)
+        
+        score_cell = ws.cell(row=12, column=2, value=f"{prs:.1f} / 100")
+        score_cell.font = Font(bold=True, size=11)
+        score_cell.alignment = center_align
+        
+        if prs < 20:
+            prs_bg = "C6EFCE"
+        elif prs < 40:
+            prs_bg = "FFEB9C"
+        elif prs < 60:
+            prs_bg = "FFE0CC"
+        else:
+            prs_bg = "FFC7CE"
+            
+        score_cell.fill = PatternFill(start_color=prs_bg, end_color=prs_bg, fill_type="solid")
+        score_cell.border = thin_border
+        lbl_cell.border = thin_border
+
+        # Section 4 - Dataset Quality Assessment (rows 13-14)
+        # Row 13 is empty
+        
+        # Row 14
+        qa_lbl = ws.cell(row=14, column=1, value="Dataset Quality Assessment:")
+        qa_lbl.font = Font(bold=True, size=11)
+        qa_lbl.alignment = Alignment(horizontal="left", vertical="center")
+        qa_lbl.border = thin_border
+
+        if prs < 20:
+            qa_text = "LOW RISK — Dataset appears clean for training use."
+            qa_color = "375623"
+        elif prs < 40:
+            qa_text = "MEDIUM RISK — Minor issues found. Review flagged entries before training."
+            qa_color = "7D6608"
+        elif prs < 60:
+            qa_text = "HIGH RISK — Significant issues found. Cleaning recommended before training."
+            qa_color = "974706"
+        else:
+            qa_text = "CRITICAL RISK — Dataset has serious quality issues. Do not use for training without cleaning."
+            qa_color = "9C0006"
+
+        qa_val = ws.cell(row=14, column=2, value=qa_text)
+        qa_val.font = Font(bold=True, size=11, color=qa_color)
+        qa_val.alignment = Alignment(horizontal="left", vertical="center")
+        qa_val.border = thin_border
+        
+        ws.merge_cells("B14:F14")
+        for col_idx in range(2, 7):
+            ws.cell(row=14, column=col_idx).border = thin_border
+
+        # Column widths for Sheet 4
+        s4_widths = {
+            "A": 28,
+            "B": 16,
+            "C": 22,
+            "D": 14,
+            "E": 12,
+            "F": 14,
+        }
+        for col_let, width in s4_widths.items():
+            ws.column_dimensions[col_let].width = width
+
+        # Freeze panes A2
+        ws.freeze_panes = "A2"
 
     return buf.getvalue()
 
@@ -382,6 +661,7 @@ async def combined_report(body: CombinedReportRequest):
         cell_duplicates=body.cell_duplicates,
         web_ai_results=body.web_ai_results,
         color_report=body.color_report,
+        summary=body.summary,
     )
 
     filename = f"pipeline_{body.pipeline_id[:8]}_report.xlsx"

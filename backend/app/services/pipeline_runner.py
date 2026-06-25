@@ -88,6 +88,20 @@ async def run_full_pipeline(
             logger.warning("Failed to read file %s: %s", filename, exc)
             entries_by_file[filename] = []
 
+    # Count unique data rows across all uploaded files
+    # A "row" is one data entry (not a cell) — so count unique
+    # (source_file, row_number) combinations to avoid counting
+    # the same spreadsheet row multiple times when it has multiple
+    # columns that each produce a separate entry
+    seen_rows: set = set()
+    for entry in all_entries:
+        row_key = (
+            entry.get("source_file", ""),
+            entry.get("row_number", 0),
+        )
+        seen_rows.add(row_key)
+    total_rows: int = len(seen_rows)
+
     try:
         loop = asyncio.get_running_loop()
         from functools import partial
@@ -318,6 +332,7 @@ async def run_full_pipeline(
 
     summary = {
         "total_files": len(files),
+        "total_rows": total_rows,
         "total_row_duplicates": len(row_duplicates),
         "total_cell_duplicates": len(cell_duplicates),
         "exact_row_matches": sum(1 for r in row_duplicates if r.type == "Exact"),
