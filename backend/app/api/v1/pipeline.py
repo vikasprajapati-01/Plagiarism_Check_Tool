@@ -340,6 +340,7 @@ async def run_pipeline_endpoint(
             cell_duplicates=[r.dict() for r in result.cell_duplicates],
             web_ai_results=[r.dict() for r in result.web_ai_results],
             color_report=color_report,
+            summary=result.summary,
         )
         filename = f"pipeline_{result.pipeline_id[:8]}_report.xlsx"
         return StreamingResponse(
