@@ -18,6 +18,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseRowKey(label: string): [string, number] | null {
+  if (!label) return null;
+  const match = label.match(/-(?:Row\s+(\d+)|([A-Z]+)(\d+))$/);
+  if (match) {
+    const rowNum = parseInt(match[1] || match[3], 10);
+    const prefix = label.slice(0, label.lastIndexOf(match[0]));
+    return [prefix, rowNum];
+  }
+  return [label, 0];
+}
+
+function uniqueRowsFromPairs(pairs: Record<string, unknown>[], typeFilter?: string): Set<string> {
+  const seen = new Set<string>();
+  for (const pair of pairs) {
+    if (typeFilter && String(pair["type"] || "") !== typeFilter) continue;
+    for (const label of [String(pair["original"] || ""), String(pair["duplicate"] || "")]) {
+      const key = parseRowKey(label);
+      if (key) {
+        seen.add(`${key[0]}__${key[1]}`);
+      }
+    }
+  }
+  return seen;
+}
+
 export type PreviewPanelProps = {
   open: boolean;
   title: string;
@@ -230,7 +255,7 @@ export default function PreviewPanel({
     };
   }, [open, kind, excelBlob]);
 
-  const reportTabs = ["Summary", "Row Matches", "Cell Matches", "Web / AI"];
+  const reportTabs = ["Summary", "Row Matches", "Cell Matches", "Web / AI", "Risk Summary"];
 
   const visibleExcelRows = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -537,8 +562,8 @@ function ReportPreview({
         }}>
           <p style={{ fontSize: 12, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Summary</p>
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 10 }}>
-            <SummaryStat label="Total Entries" value={String(summaryObj["total_entries"] ?? "—")} />
-            <SummaryStat label="Flagged" value={String(summaryObj["flagged"] ?? "—")} />
+            <SummaryStat label="Total Files" value={String(summaryObj["total_files"] ?? "—")} />
+            <SummaryStat label="Total Rows" value={String(summaryObj["total_rows"] ?? summaryObj["total_entries"] ?? "—")} />
             <SummaryStat label="Row Matches" value={String(rows.length)} />
             <SummaryStat label="Cell Matches" value={String(cells.length)} />
             <SummaryStat label="Web/AI Results" value={String(webAi.length)} />
@@ -546,6 +571,299 @@ function ReportPreview({
           <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 12 }}>
             {colorReport ? "Colored preview is enabled." : "Colored preview is off."}
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeTab === "Risk Summary") {
+    const totalRows = summaryObj["total_rows"] !== undefined
+      ? safeNumber(summaryObj["total_rows"])
+      : (summaryObj["total_entries"] !== undefined ? safeNumber(summaryObj["total_entries"]) : 0);
+
+    const exactUniqueRows = uniqueRowsFromPairs(rows, "Exact");
+    const nearUniqueRows = uniqueRowsFromPairs(rows, "Near");
+
+    const aiUniqueRows = new Set<string>();
+    for (const r of webAi) {
+      if (safeNumber(r["ai_detected_pct"]) > 50.0) {
+        const key = parseRowKey(String(r["original"] || ""));
+        if (key) aiUniqueRows.add(`${key[0]}__${key[1]}`);
+      }
+    }
+
+    const webUniqueRows = new Set<string>();
+    for (const r of webAi) {
+      if (String(r["plagiarised"] || "").trim().toLowerCase() === "yes") {
+        const key = parseRowKey(String(r["original"] || ""));
+        if (key) webUniqueRows.add(`${key[0]}__${key[1]}`);
+      }
+    }
+
+    const exactPairs = rows.filter(r => r["type"] === "Exact").length;
+    const nearPairs = rows.filter(r => r["type"] === "Near").length;
+    const semanticPairs = 0;
+    const aiPairs = webAi.filter(r => safeNumber(r["ai_detected_pct"]) > 50.0).length;
+    const webPairs = webAi.filter(r => String(r["plagiarised"] || "").trim().toLowerCase() === "yes").length;
+    const licensePairs = 0;
+
+    const exactUnique = exactUniqueRows.size;
+    const nearUnique = nearUniqueRows.size;
+    const semanticUnique = 0;
+    const aiUnique = aiUniqueRows.size;
+    const webUnique = webUniqueRows.size;
+    const licenseUnique = 0;
+
+    const getRiskLevel = (flaggedUnique: number, total: number): [string, string, string] => {
+      if (total <= 0) return ["Clean", "rgba(34, 197, 94, 0.15)", "#22C55E"];
+      const pct = flaggedUnique / total * 100;
+      if (pct === 0) return ["Clean", "rgba(34, 197, 94, 0.15)", "#22C55E"];
+      if (pct <= 5) return ["Low", "rgba(34, 197, 94, 0.15)", "#22C55E"];
+      if (pct <= 20) return ["Medium", "rgba(234, 179, 8, 0.18)", "#EAB308"];
+      return ["High", "rgba(239, 68, 68, 0.18)", "#EF4444"];
+    };
+
+    const getFormattedRate = (flaggedUnique: number, total: number): string => {
+      if (total <= 0) return "N/A";
+      return `${(flaggedUnique / total * 100).toFixed(2)}%`;
+    };
+
+    const getRiskInfo = (unique: number, total: number) => {
+      const [risk, bg, color] = getRiskLevel(unique, total);
+      return { risk, bg, color };
+    };
+
+    const exactInfo = getRiskInfo(exactUnique, totalRows);
+    const nearInfo = getRiskInfo(nearUnique, totalRows);
+    const aiInfo = getRiskInfo(aiUnique, totalRows);
+    const webInfo = getRiskInfo(webUnique, totalRows);
+
+    const rowsData = [
+      { method: "Exact Duplicate", pairs: exactPairs, unique: exactUnique, rate: getFormattedRate(exactUnique, totalRows), ...exactInfo },
+      { method: "Near Duplicate", pairs: nearPairs, unique: nearUnique, rate: getFormattedRate(nearUnique, totalRows), ...nearInfo },
+      { method: "Semantic Similar", pairs: semanticPairs, unique: semanticUnique, rate: totalRows > 0 ? "0.00%" : "N/A", risk: "Included in Near Duplicate", bg: "transparent", color: "var(--text-muted)" },
+      { method: "AI Generated", pairs: aiPairs, unique: aiUnique, rate: getFormattedRate(aiUnique, totalRows), ...aiInfo },
+      { method: "Web Plagiarised", pairs: webPairs, unique: webUnique, rate: getFormattedRate(webUnique, totalRows), ...webInfo },
+      { method: "License Violation", pairs: licensePairs, unique: licenseUnique, rate: totalRows > 0 ? "0.00%" : "N/A", risk: "Not separately tracked", bg: "transparent", color: "var(--text-muted)" },
+    ];
+
+    const overallPairs = exactPairs + nearPairs + semanticPairs + aiPairs + webPairs + licensePairs;
+    const overallUnion = new Set([...exactUniqueRows, ...nearUniqueRows, ...aiUniqueRows, ...webUniqueRows]);
+    const overallUnique = overallUnion.size;
+    const overallRate = getFormattedRate(overallUnique, totalRows);
+    const [overallRisk, overallRiskBg, overallRiskColor] = getRiskLevel(overallUnique, totalRows);
+
+    const totalForPrs = totalRows > 0 ? totalRows : 1;
+    const exactRate = exactUnique / totalForPrs;
+    const nearRate = nearUnique / totalForPrs;
+    const semanticRate = 0.0;
+    const aiRate = aiUnique / totalForPrs;
+    const webRate = webUnique / totalForPrs;
+    const licenseRate = 0.0;
+
+    const rawPrs = (
+      exactRate * 100.0 * 0.40 +
+      nearRate * 100.0 * 0.20 +
+      semanticRate * 100.0 * 0.15 +
+      aiRate * 100.0 * 0.10 +
+      webRate * 100.0 * 0.10 +
+      licenseRate * 100.0 * 0.05
+    );
+    const prs = Math.round(Math.min(100.0, rawPrs) * 10) / 10;
+
+    let prsBg = "rgba(34, 197, 94, 0.15)";
+    let prsColor = "#22C55E";
+    if (prs >= 60) {
+      prsBg = "rgba(239, 68, 68, 0.18)";
+      prsColor = "#EF4444";
+    } else if (prs >= 40) {
+      prsBg = "rgba(249, 115, 22, 0.18)";
+      prsColor = "#F97316";
+    } else if (prs >= 20) {
+      prsBg = "rgba(234, 179, 8, 0.18)";
+      prsColor = "#EAB308";
+    }
+
+    let qaText = "LOW RISK — Dataset appears clean for training use.";
+    let qaColor = "#22C55E";
+    let qaBg = "rgba(34, 197, 94, 0.08)";
+    let qaBorder = "rgba(34, 197, 94, 0.2)";
+    if (prs >= 60) {
+      qaText = "CRITICAL RISK — Dataset has serious quality issues. Do not use for training without cleaning.";
+      qaColor = "#EF4444";
+      qaBg = "rgba(239, 68, 68, 0.08)";
+      qaBorder = "rgba(239, 68, 68, 0.2)";
+    } else if (prs >= 40) {
+      qaText = "HIGH RISK — Significant issues found. Cleaning recommended before training.";
+      qaColor = "#F97316";
+      qaBg = "rgba(249, 115, 22, 0.08)";
+      qaBorder = "rgba(249, 115, 22, 0.2)";
+    } else if (prs >= 20) {
+      qaText = "MEDIUM RISK — Minor issues found. Review flagged entries before training.";
+      qaColor = "#EAB308";
+      qaBg = "rgba(234, 179, 8, 0.08)";
+      qaBorder = "rgba(234, 179, 8, 0.2)";
+    }
+
+    const s4ThStyle: React.CSSProperties = {
+      textAlign: "center",
+      padding: "10px 12px",
+      color: "var(--text-secondary)",
+      fontWeight: 900,
+      borderBottom: "1px solid var(--border)",
+      whiteSpace: "nowrap"
+    };
+
+    const s4ThLeftStyle: React.CSSProperties = {
+      ...s4ThStyle,
+      textAlign: "left"
+    };
+
+    const s4TdStyle: React.CSSProperties = {
+      padding: "10px 12px",
+      textAlign: "center",
+      color: "var(--text-primary)"
+    };
+
+    const s4TdBoldStyle: React.CSSProperties = {
+      padding: "12px 12px",
+      textAlign: "center",
+      color: "var(--text-primary)",
+      fontWeight: 900
+    };
+
+    return (
+      <div style={{ display: "grid", gap: 20 }}>
+        <div style={{
+          padding: "14px 18px",
+          background: qaBg,
+          border: `1px solid ${qaBorder}`,
+          borderRadius: 12,
+          display: "flex",
+          flexDirection: "column",
+          gap: 4
+        }}>
+          <span style={{ fontSize: 11, fontWeight: 900, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Dataset Quality Assessment</span>
+          <span style={{ fontSize: 14, fontWeight: 800, color: qaColor }}>{qaText}</span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+          <div style={{
+            background: "var(--bg-card)",
+            border: "1px solid var(--border)",
+            borderRadius: 14,
+            padding: 16,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            gap: 12
+          }}>
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Plagiarism Risk Score</p>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Weighted metric based on detection types</p>
+            </div>
+            <div style={{
+              alignSelf: "flex-start",
+              padding: "6px 14px",
+              background: prsBg,
+              border: `1px solid ${prsColor}20`,
+              borderRadius: 20,
+              fontSize: 16,
+              fontWeight: 900,
+              color: prsColor
+            }}>
+              {prs.toFixed(1)} / 100
+            </div>
+          </div>
+
+          <div style={{
+            background: "var(--bg-card)",
+            border: "1px solid var(--border)",
+            borderRadius: 14,
+            padding: 16,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            gap: 12
+          }}>
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 800, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Combined Flag Rate</p>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>Unique flagged rows vs. total entries</p>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 24, fontWeight: 900, color: "var(--text-primary)" }}>{overallRate}</span>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>({overallUnique} / {totalRows} rows)</span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: 14,
+          overflow: "hidden"
+        }}>
+          <div style={{ padding: 14, borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
+            <p style={{ fontSize: 13, fontWeight: 900, color: "var(--text-primary)" }}>Detection Methods Breakdown</p>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th style={s4ThLeftStyle}>Detection Method</th>
+                  <th style={s4ThStyle}>Flagged Pairs</th>
+                  <th style={s4ThStyle}>Unique Rows Flagged</th>
+                  <th style={s4ThStyle}>Total Rows</th>
+                  <th style={s4ThStyle}>Flag Rate</th>
+                  <th style={s4ThStyle}>Risk Level</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rowsData.map((row) => (
+                  <tr key={row.method} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 12px", color: "var(--text-primary)", fontWeight: 800 }}>{row.method}</td>
+                    <td style={s4TdStyle}>{row.pairs}</td>
+                    <td style={s4TdStyle}>{row.unique}</td>
+                    <td style={s4TdStyle}>{totalRows}</td>
+                    <td style={s4TdStyle}>{row.rate}</td>
+                    <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                      <span style={{
+                        display: "inline-block",
+                        padding: "3px 10px",
+                        borderRadius: 12,
+                        background: row.bg,
+                        color: row.color,
+                        fontSize: 12,
+                        fontWeight: 800
+                      }}>
+                        {row.risk}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                <tr style={{ background: "var(--bg-secondary)", borderBottom: "none" }}>
+                  <td style={{ padding: "12px 12px", color: "var(--text-primary)", fontWeight: 900 }}>All Methods Combined</td>
+                  <td style={s4TdBoldStyle}>{overallPairs}</td>
+                  <td style={s4TdBoldStyle}>{overallUnique}</td>
+                  <td style={s4TdBoldStyle}>{totalRows}</td>
+                  <td style={s4TdBoldStyle}>{overallRate}</td>
+                  <td style={{ padding: "12px 12px", textAlign: "center" }}>
+                    <span style={{
+                      display: "inline-block",
+                      padding: "3px 10px",
+                      borderRadius: 12,
+                      background: overallRiskBg,
+                      color: overallRiskColor,
+                      fontSize: 12,
+                      fontWeight: 900
+                    }}>
+                      {overallRisk}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     );
