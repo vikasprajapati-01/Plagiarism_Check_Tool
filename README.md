@@ -1,319 +1,273 @@
-# Plagiarism & Duplicate Detection Tool
-
-**Samsung PRISM Research Project**
-
-This project provides a unified plagiarism and duplicate detection pipeline for Excel/CSV datasets.
-
-## Table of Contents
-
-1. [Problem Statement](#problem-statement)
-2. [System Overview](#system-overview)
-3. [Architecture Diagram](#architecture-diagram)
-4. [Tech Stack](#tech-stack)
-5. [Repository Structure](#repository-structure)
-6. [Data Flow](#data-flow)
-7. [Detection Methods](#detection-methods)
-8. [API Reference](#api-reference)
-9. [Pipeline Output Format](#pipeline-output-format)
-10. [Combined Report Format](#combined-report-format)
-11. [Cleaned Report](#cleaned-report)
-12. [Configuration](#configuration)
-13. [How to Run Locally](#how-to-run-locally)
-14. [Key Design Decisions](#key-design-decisions)
+# Plagiarism and Duplicate Detection Tool (Samsung PRISM)
 
 ## Problem Statement
 
-Large-scale AI training datasets sourced from Excel sheets often contain:
-- **Exact duplicate** entries (identical copy-paste records)
-- **Near-duplicate** entries (minor edits, typos, paraphrasing)
-- **Semantically similar** content (same meaning, different words)
-- **AI-generated text** (content that may not be original human writing)
-- **Plagiarised web content** (scraped from online sources)
-- **License/copyright violations** (content with restricted usage)
-
-This tool detects all of the above, produces structured reports, and ensures data quality before training.
+This tool is built to validate AI training datasets stored as Excel (`.xlsx`, `.xls`) and CSV files. It ensures the high quality of training data by detecting and filtering out exact duplicates, near-duplicates, semantically similar content, AI-generated text, web-plagiarised content, and license/copyright violations. It provides a detailed, multi-sheet Excel risk report and can generate a cleaned version of the original dataset with flagged rows safely removed.
 
 ## System Overview
 
 | Component | Technology | Role |
-|---|---|---|
-| Backend | Python, FastAPI | Detection services, APIs |
-| Frontend | Next.js (TypeScript) | Landing page, analyzer forms |
-
-## Architecture Diagram
-
-![Architecture diagram](Architecture.png)
+| --- | --- | --- |
+| **Backend API** | FastAPI (Python) | Orchestrates the detection pipeline, processes files, and generates reports. |
+| **Frontend UI** | Next.js (React) | Provides the interface for file uploads, selecting detection modes, and viewing results. |
+| **AI / NLP Models** | PyTorch, Hugging Face | Powers semantic similarity embeddings and AI-content perplexity detection. |
 
 ## Tech Stack
 
 ### Backend
 | Library | Purpose |
-|---|---|
-| FastAPI | REST API framework (async) |
-| pandas | Excel/CSV ingestion and cleaning |
-| sentence-transformers | SBERT semantic similarity (all-MiniLM-L6-v2) |
-| transformers | AI-generated content detection (GPT-2 perplexity) |
-| openpyxl | Excel report export + cross-compare reports |
-| python-dotenv | Environment management |
-| ddgs / duckduckgo_search | Web search |
-| BeautifulSoup4 | Web page text extraction |
-| requests | HTTP for web scan |
-| rapidfuzz (optional) | License signature similarity |
-| pydantic / pydantic-settings | Request/response models + config |
+| --- | --- |
+| `fastapi`, `uvicorn`, `starlette` | API framework and ASGI server |
+| `pydantic`, `pydantic-settings` | Data validation and configuration management |
+| `pandas`, `openpyxl` | CSV and Excel file parsing and report generation |
+| `torch`, `transformers` | Deep learning framework and GPT-2 models for AI detection |
+| `sentence-transformers` | Embeddings generation for semantic matching |
+| `RapidFuzz`, `Levenshtein` | String distance algorithms for fuzzy/near-duplicate matching |
+| `beautifulsoup4`, `ddgs` | Web scraping and DuckDuckGo search for web plagiarism detection |
 
 ### Frontend
-| Library | Purpose |  
-|---|---|
-| Next.js 16 (App Router) | React framework |
-| React 19 | UI runtime |
-| TypeScript | Type-safe frontend code |
-| Tailwind CSS (via PostCSS) | Styling and utility classes |
-| xlsx | Excel parsing for analyze flows |
-
-## Frontend Notes
-
-- Pages are under `frontend/app/` using the App Router.
-- **Primary interface**: `frontend/app/analyze/page.tsx` — unified pipeline scan page (file upload, method toggles, query column input, result preview, report download, cleaned-file download).
-- Individual method sub-pages still exist under `analyze/`: `exact`, `fuzzy`, `semantic`, `ai-detect`, `web-scan`, `license`.
-- Theme is handled by `ThemeProvider` and CSS variables in `frontend/app/globals.css`.
-- Theme toggles are in `frontend/app/components/Navbar.tsx` and `frontend/app/analyze/AnalyzerLayout.tsx`.
-- Frontend reads `NEXT_PUBLIC_API_BASE` (default: `http://localhost:8000`) and `NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT` (default: `${NEXT_PUBLIC_API_BASE}/api/v1/reports/cleaned`) from the environment.
+| Library | Version | Purpose |
+| --- | --- | --- |
+| `next` | `16.2.1` | React framework for UI rendering |
+| `react`, `react-dom` | `19.2.4` | Component-based UI library |
+| `tailwindcss` | `^4` | Utility-first CSS framework |
+| `xlsx` | `^0.18.5` | Client-side Excel parsing for report preview |
 
 ## Repository Structure
 
-```
+```text
 backend/
+├── .env
+├── .gitignore
 ├── requirements.txt
 ├── scripts/
-│   └── download_models.py             # Download models locally
+│   ├── download_models.py
+│   ├── generate_test_data.py
+│   ├── api_report.xlsx
+│   └── api_response.json
 ├── tests/
-│   └── test_cross_compare.py          # cross-compare tests
+│   └── test_cross_compare.py
 └── app/
-    ├── __init__.py
-    ├── main.py                        # FastAPI entry point, loads SBERT + GPT-2 at startup
+    ├── main.py
     ├── core/
-    │   ├── __init__.py
-    │   ├── config.py                  # all env vars via pydantic-settings
-    │   ├── models.py                  # shared Pydantic request/response schemas
-    │   └── model_cache.py             # SBERT + GPT-2 singleton loader
-    ├── api/
-    │   └── v1/
-    │       ├── router.py              # mounts all sub-routers
-    │       ├── pipeline.py            # /columns, /run
-    │       ├── reports.py             # /combined and /cleaned report endpoints
-    │       └── compare.py             # cross-file row/cell comparison
+    │   ├── config.py
+    │   ├── models.py
+    │   └── model_cache.py
+    ├── api/v1/
+    │   ├── router.py
+    │   ├── pipeline.py
+    │   ├── compare.py
+    │   └── reports.py
     └── services/
-        ├── __init__.py
-        ├── preprocessor.py            # reads Excel/CSV, emits per-cell entries
-        ├── exact_match.py             # SHA-256 exact duplicate detection
-        ├── fuzzy_match.py             # Levenshtein, Jaccard, N-gram
-        ├── semantic_match.py          # SBERT cosine similarity
-        ├── ai_detector.py             # GPT-2 perplexity-based AI detection
-        ├── web_scanner.py             # DuckDuckGo + BeautifulSoup web scan
-        ├── license_detector.py        # SPDX + copyright detection
-        ├── cross_compare.py           # cross-sheet row/cell comparison
-        └── pipeline_runner.py         # orchestrates all detection methods
+        ├── preprocessor.py
+        ├── cross_compare.py
+        ├── pipeline_runner.py
+        ├── ai_detector.py
+        ├── web_scanner.py
+        ├── exact_match.py
+        ├── fuzzy_match.py
+        ├── semantic_match.py
+        └── license_detector.py
 
 frontend/
-├── README.md
 ├── package.json
-├── package-lock.json
-├── next.config.ts
-├── eslint.config.mjs
-├── postcss.config.mjs
-├── tsconfig.json
-├── app/
-│   ├── layout.tsx
-│   ├── page.tsx
-│   ├── globals.css
-│   ├── favicon.ico
-│   ├── lib/                           # (reserved for shared utilities)
-│   ├── components/
-│   │   ├── Navbar.tsx
-│   │   ├── HeroSection.tsx
-│   │   ├── AboutSection.tsx
-│   │   ├── Footer.tsx
-│   │   ├── DetectionSelector.tsx
-│   │   ├── PreviewPanel.tsx           # report & Excel preview with download
-│   │   └── ThemeProvider.tsx
-│   └── analyze/
-│       ├── page.tsx                   # unified pipeline scan page (PRIMARY)
-│       ├── AnalyzerLayout.tsx
-│       ├── folder/                    # folder-upload helper route
-│       ├── exact/page.tsx
-│       ├── fuzzy/page.tsx
-│       ├── semantic/page.tsx
-│       ├── ai-detect/page.tsx
-│       ├── web-scan/page.tsx
-│       └── license/page.tsx
-└── public/
-    ├── file.svg
-    ├── globe.svg
-    ├── next.svg
-    ├── vercel.svg
-    └── window.svg
+└── app/
+    ├── layout.tsx
+    ├── page.tsx
+    ├── components/
+    │   ├── AboutSection.tsx
+    │   ├── DetectionSelector.tsx
+    │   ├── Footer.tsx
+    │   ├── HeroSection.tsx
+    │   ├── Navbar.tsx
+    │   ├── PreviewPanel.tsx
+    │   └── ThemeProvider.tsx
+    └── analyze/
+        ├── page.tsx
+        ├── AnalyzerLayout.tsx
+        ├── ai-detect/page.tsx
+        ├── exact/page.tsx
+        ├── folder/page.tsx
+        ├── fuzzy/page.tsx
+        ├── license/page.tsx
+        ├── semantic/page.tsx
+        └── web-scan/page.tsx
 ```
-
-## Data Flow
-
-### Pipeline Run Flow (files to results)
-1. Upload file(s) to `POST /api/v1/pipeline/run` and pick a `target_column` (or leave as `"auto"`).
-2. Optionally call `POST /api/v1/pipeline/columns` first to see what columns are available.
-3. Pipeline reads and normalizes entries from the target column.
-4. Exact/fuzzy/semantic/AI/web/license methods run in-memory; cross-compare runs only for `.xlsx` files.
-5. API returns a `PipelineRunResult` JSON payload.
 
 ## Detection Methods
 
-| Method | Algorithm | Thresholds | File |
-|---|---|---|---|
-| Exact Match | SHA-256 hash comparison | 100% identical | services/exact_match.py |
-| Fuzzy Match | Levenshtein, Jaccard, N-gram | 0.85 default (Jaccard 0.68, N-gram 0.765) | services/fuzzy_match.py |
-| Semantic Match | SBERT cosine similarity | 0.85 | services/semantic_match.py |
-| AI Detection | GPT-2 perplexity scoring | Returns confidence 0.0–1.0 | services/ai_detector.py |
-| Web Scanner | DuckDuckGo + BeautifulSoup + windowed similarity | 0.50 similarity (default), 10s timeout, 1 retry | services/web_scanner.py |
-| License Detector | SPDX + copyright patterns | N/A | services/license_detector.py |
-| Cross-Compare | Row/Cell comparison across Excel files | 75% (default) | services/cross_compare.py |
-| Pipeline Runner | Orchestrates selected methods | N/A | services/pipeline_runner.py |
+| Method | Algorithm | Threshold | File |
+| --- | --- | --- | --- |
+| **Exact Match** | SHA-256 Hashing | 100% | `exact_match.py` |
+| **Fuzzy Match** | Levenshtein, Jaccard, N-gram | 0.85 | `fuzzy_match.py` |
+| **Semantic Match** | SentenceTransformers (Cosine Sim) | 0.85 | `semantic_match.py` |
+| **AI Detection** | GPT-2 Perplexity Scoring | >= 50.0% AI | `ai_detector.py` |
+| **Web Scan** | DDG Search + Windowed Levenshtein | 0.5 | `web_scanner.py` |
+| **License Check** | SPDX Keyword + Signature Similarity | 0.3 | `license_detector.py` |
+| **Cross Compare** | Row/Cell Cross-Workbook Levenshtein | 75.0% | `cross_compare.py` |
+
+## Detection Modes
+
+The pipeline orchestrator supports two primary processing modes (`detection_mode` parameter):
+
+1. **Row-wise Mode**:
+   - **Input**: User uploads one or multiple Excel/CSV workbooks. The tool automatically attempts to isolate a target column (e.g., `"Query"`) via the `target_column` parameter, or operates globally on all cells.
+   - **Comparison**: Compares each row against all others across all uploaded workbooks to find structural duplicates. Additionally, runs all NLP/AI detections sequentially on target texts.
+   - **Output**: Returns global duplicate pairs across files, along with web, AI, and license violations.
+
+2. **Column-wise Mode**:
+   - **Input**: User uploads exactly one file and specifies two distinct column names (`col1_name` and `col2_name`).
+   - **Comparison**: Performs cross-comparison exclusively between the two selected columns within the same row. NLP/AI scanning is only performed on rows that are flagged as duplicates during this internal cross-compare step.
+   - **Output**: Returns structural matches constrained to the two specific columns, saving immense computational time by bypassing AI scans for non-matching rows.
 
 ## API Reference
 
-Base URL: http://localhost:8000
-Docs: http://localhost:8000/docs
-
-### Pipeline — /api/v1/pipeline
+### Pipeline Router (`/api/v1/pipeline`)
 | Method | Path | Description |
-|---|---|---|
-| POST | /columns | Discover available column names from uploaded files (call before `/run` to pick `target_column`); auto-suggests `Query` column if found |
-| POST | /run | Unified detection run across selected methods; accepts `target_column` (or `"auto"`), `methods` JSON, `color_report` flag, and optional inline Excel download |
+| --- | --- | --- |
+| `POST` | `/columns` | Discovers available column headers from an uploaded Excel/CSV file to assist with column-wise targeting selection. |
+| `POST` | `/run` | Main execution endpoint. Runs the full unified detection pipeline across all enabled methods on the uploaded datasets. |
 
-### Reports — /api/v1/reports
+### Compare Router (`/api/v1/compare`)
 | Method | Path | Description |
-|---|---|---|
-| POST | /combined | Generate 3-sheet Excel report from a pipeline result; supports `color_report` flag for colour-coded rows |
-| POST | /cleaned | Accept original `.xlsx` files + pipeline result JSON → return cleaned `.xlsx` (or `.zip` for multiple files) with duplicate/plagiarised rows removed |
+| --- | --- | --- |
+| `POST` | `/cross` | Performs isolated cross-workbook structural duplicate detection (row and cell level) and returns JSON results. |
+| `POST` | `/report` | Runs isolated cross-comparison and directly returns a downloadable `.xlsx` report. |
+| `POST` | `/colored` | Returns a copy of the input workbook with exact and near-duplicate rows/cells structurally highlighted with background colors. |
 
-### Compare — /api/v1/compare
+### Reports Router (`/api/v1/reports`)
 | Method | Path | Description |
-|---|---|---|
-| POST | /cross | Cross-file row/cell comparison (JSON result, supports Query-column targeting) |
-| POST | /report | Cross-file comparison report (.xlsx) |
-| POST | /colored | Color-coded workbook (.xlsx) |
+| --- | --- | --- |
+| `POST` | `/cleaned` | Generates a cleaned Excel output with structurally duplicate and plagiarised rows removed based on prior JSON match lists. |
+| `POST` | `/combined` | Generates a comprehensive multi-sheet Excel risk dashboard report from raw pipeline JSON results. |
 
 ## Pipeline Output Format
 
-### PipelineRunResult (top-level)
+### JSON Response (`PipelineRunResult`)
+
 ```json
 {
-        "pipeline_id": "a1b2c3d4-...",
-        "status": "completed",
-        "summary": {
-                "total_files": 2,
-                "total_row_duplicates": 3,
-                "total_cell_duplicates": 1
-        },
-        "row_duplicates": [
-                {
-                        "original": "file1.xlsx-Row 10",
-                        "duplicate": "file2.xlsx-Row 10",
-                        "type": "Near",
-                        "similarity_pct": 84.0
-                }
-        ],
-        "cell_duplicates": [],
-        "web_ai_results": [
-                {
-                        "original": "file1.xlsx-A10",
-                        "plagiarised": "No",
-                        "source": "N/A",
-                        "ai_detected_pct": 12.0
-                }
-        ]
+  "pipeline_id": "uuid-string",
+  "status": "completed",
+  "summary": {
+    "total_files": 1,
+    "total_rows": 100,
+    "total_row_duplicates": 5,
+    "total_cell_duplicates": 10,
+    "exact_row_matches": 2,
+    "near_row_matches": 3,
+    "exact_cell_matches": 4,
+    "near_cell_matches": 6,
+    "plagiarised_entries": 12,
+    "ai_detected_entries": 8,
+    "web_ai_total_entries": 100,
+    "web_ai_returned_entries": 12
+  },
+  "row_duplicates": [
+    {
+      "original": "Original row content",
+      "duplicate": "Duplicate row content",
+      "type": "Exact",
+      "similarity_pct": 100.0
+    }
+  ],
+  "cell_duplicates": [...],
+  "web_ai_results": [
+    {
+      "original": "Original text",
+      "plagiarised": "Matched plagiarised snippet",
+      "source": "https://example.com/source",
+      "ai_detected_pct": 85.5
+    }
+  ]
 }
 ```
 
-## Combined Report Format
+## Report Sheets
 
-The combined Excel report (`POST /reports/combined`) includes three sheets:
-1. **Row-to-Row** — duplicate row pairs with similarity %
-2. **Cell-to-Cell** — duplicate cell pairs with similarity %
-3. **AI-Plagiarism** — web plagiarism + AI detection results per cell
+The combined Excel report generated by `/api/v1/reports/combined` contains four distinct sheets:
 
-Set `color_report: true` in the request body to enable colour-coded row highlights:
-- 🔴 Red — Exact duplicates / web-plagiarised entries
-- 🟡 Yellow — Near-duplicate rows
-- 🟢 Green — Non-plagiarised entries
-- AI Detected (%) cell shading: ≥80 % → red, ≥50 % → orange, ≥20 % → yellow
+1. **Row-to-Row**
+   - **Columns:** `Original`, `Duplicate`, `Type`, `Similarity (%)`
+   - **Data:** Highlights entire rows matched as exact or near duplicates across the dataset.
 
-## Cleaned Report
+2. **Cell-to-Cell**
+   - **Columns:** `Original`, `Duplicate`, `Type`, `Similarity (%)`
+   - **Data:** Highlights specific cell contents matched as duplicates, bypassing overly short strings.
 
-`POST /reports/cleaned` strips flagged rows from the original `.xlsx` file(s) and returns a sanitised workbook.
+3. **AI-Plagiarism**
+   - **Columns:** `Original`, `Plagiarised`, `Source`, `AI Detected (%)`
+   - **Data:** Details web plagiarism hits (with source URLs) alongside AI-generated probability percentages.
 
-**Rules applied:**
-- `row_duplicates` / `cell_duplicates` — the *duplicate* side row is deleted; the *original* row is kept.
-- `web_ai_results` — the row is deleted only when `plagiarised == "Yes"`; AI-only entries are left untouched.
-- Only `.xlsx` files are processed (CSV files are ignored).
-- Row 1 (header) is **never** deleted.
-- Single file → returns `.xlsx`; multiple files → returns `.zip`.
+4. **Risk Summary**
+   - **Data:** A master dashboard displaying:
+     - Flagged counts and rates broken down strictly by method (Exact, Near, Semantic, AI, Web, License).
+     - Overall Dataset Summary.
+     - Plagiarism Risk Score (PRS) calculated via a weighted average: (Exact 40%, Near 20%, Semantic 15%, AI 10%, Web 10%, License 5%).
+     - Dataset Quality Assessment labeling the dataset objectively as Low, Medium, High, or Critical Risk.
 
 ## Configuration
 
-### Backend — `backend/.env`
+The environment variables configured in `backend/app/core/config.py`:
 
-```env
-# ML Models
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-GPT2_MODEL=gpt2
-
-# Detection thresholds
-FUZZY_THRESHOLD=0.85
-SEMANTIC_THRESHOLD=0.85
-
-# Web scanner
-WEB_SCAN_TIMEOUT=10        # seconds per HTTP request
-WEB_SCAN_RETRIES=1         # retries per query
-WEB_SCAN_MAX_QUERIES=1     # DuckDuckGo queries per cell
-WEB_SCAN_MAX_RESULTS=2     # URLs fetched per query
-WEB_SCAN_MAX_SCAN_TIME=25  # max seconds per cell scan
-WEB_SCAN_OVERALL_TIMEOUT=60 # hard cap for the whole web-scan phase
-
-# Logging
-LOG_LEVEL=INFO
-```
-
-### Frontend — `frontend/.env.local`
-
-```env
-NEXT_PUBLIC_API_BASE=http://localhost:8000
-# Override only if the cleaned-file endpoint differs from the default:
-# NEXT_PUBLIC_CLEANED_EXCEL_ENDPOINT=http://localhost:8000/api/v1/reports/cleaned
-```
+| Setting | Default Value | Description |
+| --- | --- | --- |
+| `EMBEDDING_MODEL` | `"all-MiniLM-L6-v2"` | SBERT model used for generating semantic embeddings. |
+| `GPT2_MODEL` | `"gpt2"` | Language model used for perplexity-based AI detection. |
+| `FUZZY_THRESHOLD` | `0.85` | Default similarity threshold for near-duplicate string matches. |
+| `SEMANTIC_THRESHOLD` | `0.85` | Default cosine similarity threshold for semantic matches. |
+| `WEB_SCAN_TIMEOUT` | `10` | Request timeout (seconds) for fetching webpage content. |
+| `WEB_SCAN_RETRIES` | `1` | Retry limit for DuckDuckGo search queries. |
+| `WEB_SCAN_MAX_QUERIES` | `1` | Max search queries extracted per entry for web scanning. |
+| `WEB_SCAN_MAX_RESULTS` | `2` | Max search results to evaluate per query. |
+| `WEB_SCAN_MAX_SCAN_TIME`| `25` | Maximum allowed time (seconds) to scan a single entry. |
+| `WEB_SCAN_OVERALL_TIMEOUT`| `60`| Hard timeout (seconds) for the entire web/AI/license phase. |
+| `LOG_LEVEL` | `"INFO"` | Python logging level. |
 
 ## How to Run Locally
 
-### Backend
-```bash
-cd backend
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+### Backend Setup
+1. Navigate to the `backend/` directory.
+2. Create and activate a Python virtual environment.
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Download the ML models for offline usage (optional but recommended to avoid startup delays or SSL errors):
+   ```bash
+   python scripts/download_models.py
+   ```
+5. Start the backend server:
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
+*Note: The backend operates entirely in-memory and via local files; no database connection is required or established.*
 
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
+### Frontend Setup
+1. Navigate to the `frontend/` directory.
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the Next.js development server:
+   ```bash
+   npm run dev
+   ```
+
+## Model Loading
+
+The backend employs an **Offline-First Checkpoint Fallback Strategy** (`backend/app/core/model_cache.py`) to ensure robustness:
+
+1. **Online Attempt**: At startup, it attempts to download `all-MiniLM-L6-v2` and `gpt2` directly from HuggingFace.
+2. **Offline Fallback**: If the download fails (e.g., due to SSL or network errors), it automatically checks the local `backend/checkpoints/sbert` and `backend/checkpoints/gpt2` directories for pre-downloaded weights.
+3. **Graceful Degradation**: If models are missing completely from both online sources and local checkpoints, the backend continues to start without crashing. Features relying on the missing models (semantic matching or AI detection) are safely disabled, and clear warnings are emitted in the console logs and exposed on the health (`/`) endpoint.
 
 ## Key Design Decisions
 
 | Decision | Reason |
-|---|---|
-| FastAPI over Flask/Django | Async-first APIs for concurrent web scanning and batch inference |
-| SBERT all-MiniLM-L6-v2 | Balanced performance for sentence-level similarity |
-| GPT-2 AI detector | High-accuracy AI detection with swap via env var |
-| DuckDuckGo web scan | No API key required; controlled retries and timeout |
-| Per-cell provenance | Enables exact row/column traceability in reports |
-| Startup model cache | Single-load model initialization via lifespan |
+| --- | --- |
+| **Stateless Architecture** | By eschewing a database layer entirely, the tool maintains zero external state, ensuring high portability and significantly reducing setup friction for researchers evaluating datasets. |
+| **Concurrent Pipeline Execution** | CPU-bound NLP processing and I/O-bound web scanning run concurrently inside the pipeline orchestrator, bounded by semaphores and timeouts to prevent hanging on external requests. |
+| **Pydantic Validation** | Enforces strict schema rules on JSON inputs and internal data flow, ensuring that Excel report generation receives predictable data shapes without hidden errors. |
+| **Graceful ML Model Degradation** | Prevents the entire service from locking up if external AI model repositories are unreachable, ensuring basic structural duplicate detection remains fully functional offline. |
+| **Column-Targeted Analysis** | Allows massive performance gains when evaluating known datasets by restricting O(n^2) cross-comparison algorithms solely to meaningful text columns, reducing redundant operations. |
