@@ -55,6 +55,15 @@ class CombinedReportRequest(BaseModel):
 def _parse_row_key(label: str) -> Optional[Tuple[str, int]]:
     if not label:
         return None
+        
+    parts = label.split("-Row")
+    if len(parts) >= 2:
+        row_part = parts[1].split("-")[0]
+        try:
+            return (parts[0], int(row_part))
+        except ValueError:
+            pass
+
     m = re.search(r"-(?:Row\s+(\d+)|([A-Z]+)(\d+))$", label)
     if m:
         row_num = int(m.group(1) or m.group(3))
@@ -255,9 +264,13 @@ def generate_pipeline_report(
 
         total_rows = summary.get("total_rows", 0) if summary else 0
 
-        # Calculations
-        exact_unique_rows = _unique_rows_from_pairs(row_duplicates, "Exact")
-        near_unique_rows = _unique_rows_from_pairs(row_duplicates, "Near")
+        all_duplicate_pairs = list(row_duplicates) + list(cell_duplicates)
+
+        exact_pairs = [p for p in all_duplicate_pairs if p.get("type") == "Exact"]
+        near_pairs  = [p for p in all_duplicate_pairs if p.get("type") == "Near"]
+
+        exact_unique_rows = _unique_rows_from_pairs(exact_pairs)
+        near_unique_rows = _unique_rows_from_pairs(near_pairs)
         
         ai_unique_rows = {
             _parse_row_key(r.get("original"))
@@ -271,18 +284,16 @@ def generate_pipeline_report(
             if r.get("plagiarised") == "Yes"
         } - {None}
 
-        exact_pairs = sum(1 for r in row_duplicates if r.get("type") == "Exact")
-        near_pairs = sum(1 for r in row_duplicates if r.get("type") == "Near")
         semantic_pairs = 0
         ai_pairs = sum(1 for r in web_ai_results if r.get("ai_detected_pct", 0.0) > 50.0)
         web_pairs = sum(1 for r in web_ai_results if r.get("plagiarised") == "Yes")
         license_pairs = 0
 
-        exact_unique = len(exact_unique_rows)
-        near_unique = len(near_unique_rows)
+        exact_unique = len(exact_pairs)
+        near_unique = len(near_pairs)
         semantic_unique = 0
-        ai_unique = len(ai_unique_rows)
-        web_unique = len(web_unique_rows)
+        ai_unique = ai_pairs
+        web_unique = web_pairs
         license_unique = 0
 
         def _get_risk_level(flagged_unique: int, total: int) -> Tuple[str, Optional[str]]:
@@ -291,9 +302,9 @@ def generate_pipeline_report(
             pct = flagged_unique / total * 100
             if pct == 0:
                 return "Clean", "C6EFCE"
-            elif pct <= 5:
+            elif pct <= 33:
                 return "Low", "C6EFCE"
-            elif pct <= 20:
+            elif pct <= 66:
                 return "Medium", "FFEB9C"
             else:
                 return "High", "FFC7CE"
@@ -310,8 +321,8 @@ def generate_pipeline_report(
 
         # Prepare section 1 rows
         rows_data = [
-            ("Exact Duplicate", exact_pairs, exact_unique, total_rows, _format_rate(exact_unique, total_rows), exact_risk, exact_risk_color),
-            ("Near Duplicate", near_pairs, near_unique, total_rows, _format_rate(near_unique, total_rows), near_risk, near_risk_color),
+            ("Exact Duplicate", len(exact_pairs), exact_unique, total_rows, _format_rate(exact_unique, total_rows), exact_risk, exact_risk_color),
+            ("Near Duplicate", len(near_pairs), near_unique, total_rows, _format_rate(near_unique, total_rows), near_risk, near_risk_color),
             ("Semantic Similar", semantic_pairs, semantic_unique, total_rows, "0.00%" if total_rows > 0 else "N/A", "Included in Near Duplicate", None),
             ("AI Generated", ai_pairs, ai_unique, total_rows, _format_rate(ai_unique, total_rows), ai_risk, ai_risk_color),
             ("Web Plagiarised", web_pairs, web_unique, total_rows, _format_rate(web_unique, total_rows), web_risk, web_risk_color),
@@ -364,9 +375,8 @@ def generate_pipeline_report(
         ws.row_dimensions[9].height = 22
 
         # Row 10: Overall data
-        overall_pairs = exact_pairs + near_pairs + semantic_pairs + ai_pairs + web_pairs + license_pairs
-        all_unique_rows = exact_unique_rows | near_unique_rows | ai_unique_rows | web_unique_rows
-        overall_unique = len(all_unique_rows)
+        overall_pairs = len(exact_pairs) + len(near_pairs) + semantic_pairs + ai_pairs + web_pairs + license_pairs
+        overall_unique = overall_pairs
         overall_rate = _format_rate(overall_unique, total_rows)
         overall_risk, overall_risk_color = _get_risk_level(overall_unique, total_rows)
 

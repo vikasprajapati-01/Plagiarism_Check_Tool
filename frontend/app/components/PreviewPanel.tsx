@@ -580,9 +580,11 @@ function ReportPreview({
     const totalRows = summaryObj["total_rows"] !== undefined
       ? safeNumber(summaryObj["total_rows"])
       : (summaryObj["total_entries"] !== undefined ? safeNumber(summaryObj["total_entries"]) : 0);
+    // Combine row and cell duplicates (used for unique-row parsing from labels)
+    const allDuplicatePairs = [...rows, ...cells];
 
-    const exactUniqueRows = uniqueRowsFromPairs(rows, "Exact");
-    const nearUniqueRows = uniqueRowsFromPairs(rows, "Near");
+    const exactUniqueRows = uniqueRowsFromPairs(allDuplicatePairs, "Exact");
+    const nearUniqueRows = uniqueRowsFromPairs(allDuplicatePairs, "Near");
 
     const aiUniqueRows = new Set<string>();
     for (const r of webAi) {
@@ -600,26 +602,33 @@ function ReportPreview({
       }
     }
 
-    const exactPairs = rows.filter(r => r["type"] === "Exact").length;
-    const nearPairs = rows.filter(r => r["type"] === "Near").length;
+    // Use backend summary counts where available (exact_row + exact_cell combined)
+    const exactPairs =
+      (safeNumber(summaryObj["exact_row_matches"]) + safeNumber(summaryObj["exact_cell_matches"])) ||
+      allDuplicatePairs.filter(r => r["type"] === "Exact").length;
+    const nearPairs =
+      (safeNumber(summaryObj["near_row_matches"]) + safeNumber(summaryObj["near_cell_matches"])) ||
+      allDuplicatePairs.filter(r => r["type"] === "Near").length;
     const semanticPairs = 0;
-    const aiPairs = webAi.filter(r => safeNumber(r["ai_detected_pct"]) > 50.0).length;
-    const webPairs = webAi.filter(r => String(r["plagiarised"] || "").trim().toLowerCase() === "yes").length;
+    const aiPairs = safeNumber(summaryObj["ai_detected_entries"]) ||
+      webAi.filter(r => safeNumber(r["ai_detected_pct"]) > 50.0).length;
+    const webPairs = safeNumber(summaryObj["plagiarised_entries"]) ||
+      webAi.filter(r => String(r["plagiarised"] || "").trim().toLowerCase() === "yes").length;
     const licensePairs = 0;
 
-    const exactUnique = exactUniqueRows.size;
-    const nearUnique = nearUniqueRows.size;
+    const exactUnique = exactPairs;
+    const nearUnique = nearPairs;
     const semanticUnique = 0;
-    const aiUnique = aiUniqueRows.size;
-    const webUnique = webUniqueRows.size;
+    const aiUnique = aiPairs;
+    const webUnique = webPairs;
     const licenseUnique = 0;
 
     const getRiskLevel = (flaggedUnique: number, total: number): [string, string, string] => {
       if (total <= 0) return ["Clean", "rgba(34, 197, 94, 0.15)", "#22C55E"];
       const pct = flaggedUnique / total * 100;
       if (pct === 0) return ["Clean", "rgba(34, 197, 94, 0.15)", "#22C55E"];
-      if (pct <= 5) return ["Low", "rgba(34, 197, 94, 0.15)", "#22C55E"];
-      if (pct <= 20) return ["Medium", "rgba(234, 179, 8, 0.18)", "#EAB308"];
+      if (pct <= 33) return ["Low", "rgba(34, 197, 94, 0.15)", "#22C55E"];
+      if (pct <= 66) return ["Medium", "rgba(234, 179, 8, 0.18)", "#EAB308"];
       return ["High", "rgba(239, 68, 68, 0.18)", "#EF4444"];
     };
 
@@ -648,8 +657,7 @@ function ReportPreview({
     ];
 
     const overallPairs = exactPairs + nearPairs + semanticPairs + aiPairs + webPairs + licensePairs;
-    const overallUnion = new Set([...exactUniqueRows, ...nearUniqueRows, ...aiUniqueRows, ...webUniqueRows]);
-    const overallUnique = overallUnion.size;
+    const overallUnique = overallPairs;
     const overallRate = getFormattedRate(overallUnique, totalRows);
     const [overallRisk, overallRiskBg, overallRiskColor] = getRiskLevel(overallUnique, totalRows);
 
